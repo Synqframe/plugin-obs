@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20)
+project(layout-socket-check CXX)
+find_package(CURL REQUIRED)
+add_executable(client client.cpp)
+target_compile_features(client PRIVATE cxx_std_20)
+target_link_libraries(client PRIVATE CURL::libcurl)
+
+# The real WebSocket client (synqframe-protocol), which needs only libcurl.
+add_executable(wsclient-check wsclient-check.cpp ../../../vendor/synqframe-protocol/src/ws-client.cpp)
+target_compile_features(wsclient-check PRIVATE cxx_std_20)
+target_include_directories(wsclient-check PRIVATE ../../../vendor/synqframe-protocol/include)
+target_link_libraries(wsclient-check PRIVATE CURL::libcurl)
+if(WIN32)
+  target_link_libraries(wsclient-check PRIVATE ws2_32)
+endif()

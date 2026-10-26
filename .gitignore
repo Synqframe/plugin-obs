@@ -1,0 +1,7 @@
+.tools/
+.runtime/
+build*/
+.vscode/
+*.log
+__pycache__/
+*.py[cod]
