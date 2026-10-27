@@ -1,5 +1,7 @@
 param(
-  [string]$Device = "Microphone (HyperX QuadCast S)",
+  # A DirectShow audio device name, as ffmpeg -list_devices true -f dshow -i dummy shows it.
+  [Parameter(Mandatory = $true)]
+  [string]$Device,
   [ValidateRange(2, 30)]
   [int]$DurationSeconds = 5,
   [ValidateSet(44100, 48000)]
