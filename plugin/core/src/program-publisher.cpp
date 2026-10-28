@@ -227,8 +227,35 @@ bool ProgramPublisher::start(std::string &error)
       // It also makes a full-resolution media source render directly into the
       // smaller Local-analysis canvas, which clips instead of downscaling.
       auto videoSource = obs_source_get_ref(routedScene);
-      const uint32_t canvasWidth = std::max(1u, obs_source_get_width(videoSource));
-      const uint32_t canvasHeight = std::max(1u, obs_source_get_height(videoSource));
+      const uint32_t sourceWidth = obs_source_get_width(videoSource);
+      const uint32_t sourceHeight = obs_source_get_height(videoSource);
+      uint32_t canvasWidth = std::max(1u, sourceWidth);
+      uint32_t canvasHeight = std::max(1u, sourceHeight);
+      // A source with no size yet (a game capture that hasn't hooked): a canvas of its size would
+      // be 1x1, its one pixel stretched over the bundle (2026-10-27: a flat colour for 9 minutes).
+      // Instead it goes in a scene of the bundle's own size, fitted within its bounds as it
+      // appears, at whatever size that turns out to be.
+      if (sourceWidth == 0 || sourceHeight == 0) {
+        blog(LOG_WARNING, "[Synqframe] Bundle %s: its source has no size yet (a capture not hooked?); fitting it to %dx%d",
+             bundle.id.c_str(), bundle.width, bundle.height);
+        canvasWidth = (uint32_t)bundle.width;
+        canvasHeight = (uint32_t)bundle.height;
+        if (auto *fitScene = obs_scene_create_private((name + " fit").c_str())) {
+          if (auto *fitted = obs_scene_add(fitScene, videoSource)) {
+            const vec2 origin{0.0f, 0.0f};
+            const vec2 bounds{(float)canvasWidth, (float)canvasHeight};
+            obs_sceneitem_set_alignment(fitted, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+            obs_sceneitem_set_pos(fitted, &origin);
+            obs_sceneitem_set_bounds_type(fitted, OBS_BOUNDS_SCALE_INNER);
+            obs_sceneitem_set_bounds_alignment(fitted, OBS_ALIGN_CENTER);
+            obs_sceneitem_set_bounds(fitted, &bounds);
+          }
+          item.fitSource = obs_source_get_ref(obs_scene_get_source(fitScene));
+          obs_source_release(videoSource);
+          videoSource = obs_source_get_ref(item.fitSource);
+          obs_scene_release(fitScene);
+        }
+      }
       // Flipped in OBS (a mirrored camera): the source in a scene of its own, flipped within
       // bounds of its own size so it stays in place, as OBS's own flip does.
       if (bundle.flipX || bundle.flipY) {
@@ -316,6 +343,9 @@ bool ProgramPublisher::start(std::string &error)
       const double targetFps = static_cast<double>(bundle.fpsNum) / std::max(1, bundle.fpsDen);
       const uint32_t fpsDivisor =
         targetFps > 0.0 && targetFps < mainFps ? std::max(1u, static_cast<uint32_t>(std::lround(mainFps / targetFps))) : 1u;
+      blog(LOG_INFO, "[Synqframe] Bundle %s: source %ux%u, canvas %ux%u, sent %ux%u at %.2f fps (OBS %.2f, every %u)",
+           bundle.id.c_str(), sourceWidth, sourceHeight, info.base_width, info.base_height, info.output_width,
+           info.output_height, mainFps / fpsDivisor, mainFps, fpsDivisor);
       item.video = obs_view_add2(item.view, &info);
       obs_source_release(videoSource);
       settings = config_.videoEncoderSettings.empty() ? obs_data_create()
@@ -488,6 +518,10 @@ void ProgramPublisher::endRoute(size_t index, const char *why)
   if (item.output) obs_output_stop(item.output);
   // Let go of the source now, not at Stop Streaming, so OBS can destroy it.
   if (item.view) obs_view_set_source(item.view, 0, nullptr);
+  if (item.fitSource) {
+    obs_source_release(item.fitSource);
+    item.fitSource = nullptr;
+  }
   if (item.compositeSource) {
     obs_source_release(item.compositeSource);
     item.compositeSource = nullptr;
@@ -570,6 +604,7 @@ void ProgramPublisher::release()
       obs_view_set_source(item->view, 0, nullptr);
       obs_view_destroy(item->view);
     }
+    if (item->fitSource) obs_source_release(item->fitSource);
     if (item->compositeSource) obs_source_release(item->compositeSource);
     if (item->flipSource) obs_source_release(item->flipSource);
     if (item->packSource) obs_source_release(item->packSource);

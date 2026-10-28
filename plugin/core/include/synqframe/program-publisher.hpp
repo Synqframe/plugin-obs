@@ -37,7 +37,7 @@ public:
   uint64_t totalBytes() const; int droppedFrames() const;
 private:
   struct AudioRoute { obs_source *source=nullptr; uint32_t previousMixers=0; };
-  struct ChannelOutput { std::string channel; obs_output *output=nullptr; obs_service *service=nullptr; obs_view *view=nullptr; video_output *video=nullptr; obs_source *compositeSource=nullptr; obs_source *flipSource=nullptr; obs_source *packSource=nullptr; obs_source *alphaSource=nullptr; std::vector<AudioRoute> audioRoutes; std::vector<std::string> audioMemberUuids; obs_encoder *videoEncoder=nullptr; obs_encoder *audioEncoder=nullptr; obs_output *isoOutput=nullptr; std::shared_ptr<CaptureTimeStamper> stamper; uint32_t mix=0; bool removed=false; };
+  struct ChannelOutput { std::string channel; obs_output *output=nullptr; obs_service *service=nullptr; obs_view *view=nullptr; video_output *video=nullptr; obs_source *fitSource=nullptr; obs_source *compositeSource=nullptr; obs_source *flipSource=nullptr; obs_source *packSource=nullptr; obs_source *alphaSource=nullptr; std::vector<AudioRoute> audioRoutes; std::vector<std::string> audioMemberUuids; obs_encoder *videoEncoder=nullptr; obs_encoder *audioEncoder=nullptr; obs_output *isoOutput=nullptr; std::shared_ptr<CaptureTimeStamper> stamper; uint32_t mix=0; bool removed=false; };
   // A route watches its source's "remove" signal through a weak reference: deleting the source
   // while streaming ends that route (its output, view and audio routing), where the route's own
   // references used to keep a deleted Media Source playing into the bundle until Stop Streaming
