@@ -17,6 +17,20 @@ describes its design and the rules it follows.
 - [Aitum Vertical](https://github.com/Aitum/obs-vertical-canvas), optional, for a vertical
   program.
 
+## Installing
+
+There's no installer. Download `synqframe.dll` from the
+[releases](https://github.com/Synqframe/plugin-obs/releases), then:
+
+1. Close OBS.
+2. Copy `synqframe.dll` into `obs-plugins\64bit\` under your OBS folder. For a standard
+   install that's `C:\Program Files\obs-studio\obs-plugins\64bit\`, which needs administrator
+   rights to write to.
+3. Start OBS. The Synqframe dock is under **Docks**, and the **Synqframe Bundle** filter is in
+   a source's filter list.
+
+To remove the plugin, close OBS and delete that file.
+
 ## Building on Windows
 
 You need Visual Studio 2026 with C++, CMake 3.28 or later, and an OBS Studio 32.2.1 source
