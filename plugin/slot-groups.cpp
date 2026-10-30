@@ -7,6 +7,7 @@
 #include <synqframe/slot-mask.hpp>
 #include "network-request.hpp"
 #include "page-sources.hpp"
+#include "text-sources.hpp"
 
 #include <obs-module.h>
 
@@ -39,7 +40,7 @@ const QSet<QString> &allowedKinds()
 
 bool isSlotSource(obs_source_t *source)
 {
-  return source && !(bundleIdOf(source).isEmpty() && pageIdOf(source).isEmpty());
+  return source && !(bundleIdOf(source).isEmpty() && pageIdOf(source).isEmpty() && textIdOf(source).isEmpty());
 }
 
 // A filter as the layout states it, normalised as the server and the worker do.

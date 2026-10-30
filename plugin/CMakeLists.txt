@@ -33,6 +33,7 @@ target_sources(
     bundle-filter.cpp
     plugin-signals.cpp
     page-sources.cpp
+    text-sources.cpp
     slot-groups.cpp
     bundle-filter.hpp
     aitum-vertical.cpp

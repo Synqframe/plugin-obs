@@ -11,6 +11,7 @@
 #include <synqframe/ws-client.hpp>
 #include "bundle-filter.hpp"
 #include "page-sources.hpp"
+#include "text-sources.hpp"
 #include "global-audio.hpp"
 #include "aitum-vertical.hpp"
 #include "layout-stacking.hpp"
@@ -472,11 +473,14 @@ void applyProgramScenes(const QJsonObject &state)
   }
 }
 
-// What a layout slot names an item by: its bundle's id, or its page's (a widget's or overlay's).
+// What a layout slot names an item by: its bundle's id, its page's (a widget's or overlay's), or
+// its text's (textIdFor).
 QString slotSourceIdOf(obs_source_t *source)
 {
   const QString bundle = bundleIdOf(source);
-  return bundle.isEmpty() ? pageIdOf(source) : bundle;
+  if (!bundle.isEmpty()) return bundle;
+  const QString page = pageIdOf(source);
+  return page.isEmpty() ? textIdOf(source) : page;
 }
 
 bool captureLayoutItem(obs_scene_t *, obs_sceneitem_t *placed, void *opaque)
@@ -491,6 +495,8 @@ bool captureLayoutItem(obs_scene_t *, obs_sceneitem_t *placed, void *opaque)
   // A slot's item shows the source its bundle filter is on, or its page's browser source.
   const QString id = slotSourceIdOf(source);
   if (id.isEmpty()) return true;
+  // Text isn't said back yet: the server keeps a text slot OBS doesn't send (b4dcb33).
+  if (!textIdOf(source).isEmpty()) return true;
   obs_source_t *placedSource = obs_sceneitem_get_source(placed);
   vec2 position{}, bounds{}, scale{};
   obs_sceneitem_get_pos(placed, &position);
@@ -635,7 +641,8 @@ bool applyLayoutItem(obs_scene_t *, obs_sceneitem_t *placed, void *opaque)
                       static_cast<float>(slot.value("y").toDouble() * context.height)};
   const vec2 bounds{static_cast<float>(slot.value("width").toDouble() * context.width),
                     static_cast<float>(slot.value("height").toDouble() * context.height)};
-  const QString fit = slot.value("fitMode").toString("contain");
+  // Text is drawn at the slot's size in layout pixels (text-sources.hpp): stretched into place.
+  const QString fit = textIdOf(source).isEmpty() ? slot.value("fitMode").toString("contain") : QStringLiteral("stretch");
   // The slot's flip is the editor's extra flip, for composition only: kept on the item below for
   // capture to report back. `current` is the item's own (OBS's) flip.
   vec2 current{};
@@ -724,6 +731,12 @@ void applyLayoutScene(obs_scene_t *scene, const QJsonObject &document, const QSt
     if (!viewerId.isEmpty() && slot.value("sourceKind").toString() == QStringLiteral("director") &&
         slot.value("contributorId").toString() != viewerId)
       continue;
+    if (slot.value("sourceKind").toString() == QStringLiteral("text")) {
+      const QString textId = textIdFor(slot.value("id").toString());
+      context.itemsByBundle.insert(textId, slot);
+      context.slotIndexByBundle.insert(textId, slotIndex);
+      continue;
+    }
     const QString sourceId = slot.value("sourceId").toString(
       slot.value("channel").toString().remove(QRegularExpression("_(video|audio)$")));
     if (!sourceId.isEmpty()) {
@@ -750,7 +763,8 @@ void applyLayoutScene(obs_scene_t *scene, const QJsonObject &document, const QSt
         if (!source) return true;
         const QString id = slotSourceIdOf(source);
         if (!id.isEmpty()) present.ids.insert(id);
-        if (!pageIdOf(source).isEmpty() && !present.placed->contains(id)) present.stalePages.push_back(item);
+        if ((!pageIdOf(source).isEmpty() || !textIdOf(source).isEmpty()) && !present.placed->contains(id))
+          present.stalePages.push_back(item);
         return true;
       },
       &present);
@@ -759,6 +773,7 @@ void applyLayoutScene(obs_scene_t *scene, const QJsonObject &document, const QSt
       if (present.ids.contains(it.key())) continue;
       obs_source_t *source = bundleSourceFor(it.key());
       if (!source) source = pageSourceFor(it.key());
+      if (!source) source = textSourceFor(it.key());
       if (source) {
         obs_scene_add(scene, source);
         obs_source_release(source);
@@ -808,6 +823,7 @@ void applyCentralLayout(const QJsonObject &document)
   suppressOutboundLayoutsUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
   // Pages first, so the scenes below can place them (layout.schema.json synqframe_page).
   syncPageSources(document);
+  syncTextSources(document);
   const QString viewerId = document.value("contributorId").toString();
   QHash<QString, QJsonObject> scenes;
   for (const QJsonValue &value : document.value("scenes").toArray()) {
@@ -1310,6 +1326,7 @@ void frontendEvent(enum obs_frontend_event event, void *)
        event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
     globalAudioCollectionChanging();
     releasePageSources(); // the collection's sources go; a new one gets its pages from the next layout
+    releaseTextSources(); // and its text
   }
   if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPED && serviceRefreshDeferred) {
     serviceRefreshDeferred = false;
@@ -1454,6 +1471,7 @@ bool obs_module_load(void)
 {
   registerBundleFilter();
   registerContributionOutput();
+  registerTextSources();
   synqframe::registerService();
   createPluginContext();
   startGlobalAudioGuard(pluginContext);
