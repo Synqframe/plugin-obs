@@ -260,6 +260,129 @@ void releaseScenes(std::vector<obs_source_t *> &scenes)
   scenes.clear();
 }
 
+// ---- Kept scenes ----
+// A scene the plugin made that the web drops (another layout pack's, after a category change)
+// leaves OBS's scene list, so OBS only ever shows the active pack's scenes. What the creator
+// added to it is kept: the scene and the sources only it showed, as obs_save_source() gives
+// them, saved with the scene collection (their uuids are the collection's). When the web lists
+// that scene again it comes back as it was, instead of empty.
+constexpr const char *KeptScenesKey = "synqframe_kept_scenes";
+obs_data_t *keptScenes = nullptr; // "<canvas>:<web scene id>" -> {sources: [..., the scene last]}
+
+QByteArray keptKey(const std::string &id, bool vertical)
+{
+  return (vertical ? QByteArrayLiteral("vertical:") : QByteArrayLiteral("main:")) + QByteArray::fromStdString(id);
+}
+
+void keptScenesSaveLoad(obs_data_t *data, bool saving, void *)
+{
+  if (saving) {
+    obs_data_set_obj(data, KeptScenesKey, keptScenes);
+    return;
+  }
+  obs_data_release(keptScenes);
+  keptScenes = obs_data_get_obj(data, KeptScenesKey);
+  if (!keptScenes) keptScenes = obs_data_create();
+}
+
+// Whether a scene other than `except`, on either canvas, shows `source`, groups included.
+bool shownElsewhere(obs_source_t *source, obs_source_t *except)
+{
+  bool found = false;
+  for (const bool vertical : {false, true}) {
+    std::vector<obs_source_t *> scenes = canvasScenes(vertical);
+    for (obs_source_t *scene : scenes)
+      if (!found && scene != except && obs_scene_find_source_recursive(obs_scene_from_source(scene), obs_source_get_name(source)))
+        found = true;
+    releaseScenes(scenes);
+  }
+  return found;
+}
+
+// The sources of `scene` (and of its groups) that would go with it: not a page (the layout makes
+// those) and not a scene (that one stays in the list on its own).
+void collectKeptSources(obs_scene_t *scene, obs_source_t *owner, obs_data_array_t *sources)
+{
+  struct Collect {
+    obs_source_t *owner;
+    obs_data_array_t *sources;
+  } collect{owner, sources};
+  obs_scene_enum_items(
+    scene,
+    [](obs_scene_t *, obs_sceneitem_t *item, void *data) {
+      auto *c = static_cast<Collect *>(data);
+      obs_source_t *source = obs_sceneitem_get_source(item);
+      if (obs_source_is_group(source)) collectKeptSources(obs_sceneitem_group_get_scene(item), c->owner, c->sources);
+      else if (obs_source_is_scene(source) || !pageIdOf(source).isEmpty() || shownElsewhere(source, c->owner))
+        return true;
+      obs_data_t *saved = obs_save_source(source);
+      obs_data_array_push_back(c->sources, saved);
+      obs_data_release(saved);
+      return true;
+    },
+    &collect);
+}
+
+// Saves `scene` (ours, for web scene `id`) before it's removed.
+void keepScene(obs_source_t *scene, const std::string &id, bool vertical)
+{
+  obs_data_array_t *sources = obs_data_array_create();
+  collectKeptSources(obs_scene_from_source(scene), scene, sources);
+  obs_data_t *saved = obs_save_source(scene);
+  obs_data_array_push_back(sources, saved);
+  obs_data_release(saved);
+  obs_data_t *kept = obs_data_create();
+  obs_data_set_array(kept, "sources", sources);
+  obs_data_set_obj(keptScenes, keptKey(id, vertical).constData(), kept);
+  obs_data_release(kept);
+  obs_data_array_release(sources);
+}
+
+// The kept scene for web scene `want`, back in OBS under the web's name: a strong reference, or
+// null when none was kept (or it can't come back: its canvas is gone, or its uuid is taken).
+// Its sources come back only where they no longer exist; one still there is shared again.
+obs_source_t *restoreKeptScene(const WantedScene &want, bool vertical)
+{
+  const QByteArray key = keptKey(want.id, vertical);
+  obs_data_t *kept = keptScenes ? obs_data_get_obj(keptScenes, key.constData()) : nullptr;
+  if (!kept) return nullptr;
+  obs_data_array_t *saved = obs_data_get_array(kept, "sources");
+  obs_data_release(kept);
+  obs_data_erase(keptScenes, key.constData()); // tried once, kept or not
+  const size_t count = obs_data_array_count(saved);
+  obs_data_t *sceneData = count ? obs_data_array_item(saved, count - 1) : nullptr;
+  const std::string sceneUuid = sceneData ? obs_data_get_string(sceneData, "uuid") : "";
+  bool usable = sceneData && !sceneUuid.empty();
+  if (usable)
+    if (obs_source_t *taken = obs_get_source_by_uuid(sceneUuid.c_str())) {
+      obs_source_release(taken);
+      usable = false;
+    }
+  if (usable && vertical) {
+    obs_canvas_t *canvas = obs_get_canvas_by_uuid(obs_data_get_string(sceneData, "canvas_uuid"));
+    usable = canvas != nullptr;
+    obs_canvas_release(canvas);
+  }
+  obs_source_t *restored = nullptr;
+  if (usable) {
+    obs_data_set_string(sceneData, "name", want.name.c_str());
+    obs_data_array_t *load = obs_data_array_create();
+    for (size_t i = 0; i < count; ++i) {
+      obs_data_t *source = obs_data_array_item(saved, i);
+      obs_source_t *existing = obs_get_source_by_uuid(obs_data_get_string(source, "uuid"));
+      if (existing) obs_source_release(existing);
+      else obs_data_array_push_back(load, source);
+      obs_data_release(source);
+    }
+    obs_load_sources(load, nullptr, nullptr);
+    obs_data_array_release(load);
+    restored = obs_get_source_by_uuid(sceneUuid.c_str());
+  }
+  if (sceneData) obs_data_release(sceneData);
+  obs_data_array_release(saved);
+  return restored;
+}
+
 // Our scene for web scene `id` on one canvas: a strong reference, or null.
 obs_source_t *sceneForId(const QString &id, bool vertical)
 {
@@ -323,6 +446,12 @@ void syncCanvasScenes(bool vertical)
       blog(LOG_INFO, "[Synqframe] Scene '%s' renamed '%s', as in the web", from.c_str(), to.c_str());
     }
   for (const WantedScene &want : plan.create) {
+    if (obs_source_t *restored = restoreKeptScene(want, vertical)) {
+      blog(LOG_INFO, "[Synqframe] Brought back scene '%s' (%s canvas) for web scene %s, as it was", want.name.c_str(),
+           canvasName, want.id.c_str());
+      obs_source_release(restored);
+      continue;
+    }
     obs_scene_t *scene = nullptr;
     if (vertical) {
       if (obs_canvas_t *canvas = getVerticalLayoutCanvas()) {
@@ -348,7 +477,8 @@ void syncCanvasScenes(bool vertical)
     obs_source_t *scene = byName(name);
     // Never the scene on air or in Preview; it goes at the next sync after it leaves them.
     if (!scene || scene == current || scene == preview) continue;
-    blog(LOG_INFO, "[Synqframe] Removed scene '%s' (%s canvas): the plugin made it and the web no longer has it", name.c_str(),
+    keepScene(scene, sceneMark(scene).toStdString(), vertical);
+    blog(LOG_INFO, "[Synqframe] Removed scene '%s' (%s canvas), kept to come back: the web no longer has it", name.c_str(),
          canvasName);
     obs_source_remove(scene);
   }
@@ -1510,6 +1640,8 @@ bool obs_module_load(void)
   // Register every dock before OBS restores QMainWindow::DockState (see
   // registerGoLiveDock); FINISHED_LOADING is too late.
   obs_frontend_add_event_callback(frontendEvent, nullptr);
+  keptScenes = obs_data_create();
+  obs_frontend_add_save_callback(keptScenesSaveLoad, nullptr);
   blog(LOG_INFO, "Synqframe plugin loaded");
   return true;
 }
@@ -1521,6 +1653,9 @@ void obs_module_unload(void)
   stopLayoutSocket();
   stopPluginSignals();
   obs_frontend_remove_event_callback(frontendEvent, nullptr);
+  obs_frontend_remove_save_callback(keptScenesSaveLoad, nullptr);
+  obs_data_release(keptScenes);
+  keptScenes = nullptr;
   unwatchLayoutScenes();
   unloadGoLiveDock();
   // No call in flight outlives the plugin's code, or hands an answer to a context that's gone.
