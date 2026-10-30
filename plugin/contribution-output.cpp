@@ -44,7 +44,8 @@ struct ContributionOutput {
   std::unique_ptr<synqframe::ProgramPublisher> publisher;
   // composer self: the program as Enhanced Broadcasting's ladder (multitrack-publish.hpp).
   std::unique_ptr<MultitrackPublish> multitrack;
-  // Remote: what this output carries in place of OBS's streaming encoder (attachStandInEncoder).
+  // Remote, and the ladder: what this output carries in place of OBS's streaming encoder
+  // (attachStandInEncoder).
   // Kept until the next start or the output's end, when nothing encodes on it any more.
   obs_encoder_t *standIn = nullptr;
   // Only an output that started tells the server streaming stopped.
@@ -408,7 +409,12 @@ void destroyOutput(void *data)
 // cores) went nowhere: discardEncodedPacket dropped every packet. Put a stand-in on the output
 // instead: a 256x144 encode at about 1 fps, on the GPU where OBS has an encoder there. OBS sets
 // its own encoder back on the output at every Start Streaming, so no other mode sees this.
-bool attachStandInEncoder(ContributionOutput *context, const obs_video_info &video)
+//
+// The ladder needs it too: OBS's encoder is its top rung, in its encoder group. An encoder this
+// output also kept running never stopped when the ladder dropped, so libobs kept the group's old
+// start timestamp and the reconnected ladder's other rungs waited for that frame for ever: the
+// ladder reconnected and sent nothing until the ingest closed it (live test 2026-10-30).
+bool attachStandInEncoder(ContributionOutput *context, const obs_video_info &video, const char *mode)
 {
   if (context->standIn) {
     obs_encoder_release(context->standIn);
@@ -427,7 +433,8 @@ bool attachStandInEncoder(ContributionOutput *context, const obs_video_info &vid
   obs_data_set_int(settings, "keyint_sec", 2);
   obs_data_set_int(settings, "bf", 0);
   obs_data_set_string(settings, "preset", "ultrafast");
-  context->standIn = obs_video_encoder_create(id, "Synqframe stand-in (remote mode)", settings, nullptr);
+  const std::string name = std::string("Synqframe stand-in (") + mode + ")";
+  context->standIn = obs_video_encoder_create(id, name.c_str(), settings, nullptr);
   obs_data_release(settings);
   if (!context->standIn) return false;
   obs_encoder_set_video(context->standIn, obs_get_video());
@@ -436,7 +443,7 @@ bool attachStandInEncoder(ContributionOutput *context, const obs_video_info &vid
   const double fps = static_cast<double>(video.fps_num) / std::max(1u, video.fps_den);
   obs_encoder_set_frame_rate_divisor(context->standIn, std::max(1u, static_cast<uint32_t>(std::lround(fps))));
   obs_output_set_video_encoder(context->output, context->standIn);
-  blog(LOG_INFO, "[Synqframe] Remote mode: OBS's streaming encoder is not used; a %s stand-in at 256x144, 1 fps carries the output",
+  blog(LOG_INFO, "[Synqframe] %s: a %s stand-in at 256x144, 1 fps carries the output in place of OBS's streaming encoder", mode,
        id);
   return true;
 }
@@ -906,6 +913,9 @@ bool startOutput(void *data)
       obs_output_set_last_error(context->output, ladderError.toUtf8().constData());
       return false;
     }
+    // The ladder alone runs OBS's encoder, so it can stop and start again with the ladder.
+    if (!attachStandInEncoder(context, video, "the ladder"))
+      blog(LOG_WARNING, "[Synqframe] No stand-in encoder: the ladder goes out, but can't come back if it drops");
     config.reservedMixes = 1u << obs_encoder_get_mixer_index(programAudio);
   } else if (selfComposed) {
     config.sharedProgramVideoEncoder = obs_output_get_video_encoder(context->output);
@@ -914,7 +924,7 @@ bool startOutput(void *data)
       return false;
     }
     warnAboutProgramEncoder(config.sharedProgramVideoEncoder, video);
-  } else if (!attachStandInEncoder(context, video)) {
+  } else if (!attachStandInEncoder(context, video, "remote mode")) {
     // Not fatal: OBS's own encoder stays on the output, as before.
     blog(LOG_WARNING, "[Synqframe] Remote mode: no stand-in encoder; OBS's streaming encoder keeps running unused");
   }
