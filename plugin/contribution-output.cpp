@@ -1130,7 +1130,9 @@ static void addBundlesMidStream(ContributionOutput *context)
   for (const LocalBundle &bundle : collectLocalBundles(duplicate, error, nullptr)) {
     if (std::find(running.begin(), running.end(), bundle.id.toStdString()) != running.end()) continue;
     obs_source_t *source = obs_get_source_by_uuid(bundle.sourceUuid.toUtf8().constData());
-    const bool shown = source && bundleShown(source);
+    // Started again only once it has a size: a camera just shown again reports 0x0 for a moment, and a
+    // route built then was fitted around nothing and sent black (owner, 2026-11-14).
+    const bool shown = source && bundleShown(source) && obs_source_get_width(source) > 0 && obs_source_get_height(source) > 0;
     if (source) obs_source_release(source);
     if (shown) waiting.insert(bundle.id);
   }
