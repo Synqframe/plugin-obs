@@ -1108,31 +1108,9 @@ static bool bundleShown(obs_source_t *source)
   return inSomeScene(source) && hasContent(source);
 }
 
-// A running route ends only after its source has gone unshown for 3 s, so emptying a group to
-// refill it, or moving it between scenes, doesn't drop the feed. UI thread; cleared when nothing
-// publishes.
-static QHash<QString, qint64> unshownSinceMs;
-static bool shownLately(obs_source_t *source)
-{
-  const QString uuid = QString::fromUtf8(obs_source_get_uuid(source));
-  if (bundleShown(source)) {
-    unshownSinceMs.remove(uuid);
-    return true;
-  }
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
-  const auto since = unshownSinceMs.constFind(uuid);
-  if (since == unshownSinceMs.constEnd()) {
-    unshownSinceMs.insert(uuid, now);
-    return true;
-  }
-  if (now - *since < 3000) return true;
-  unshownSinceMs.remove(uuid);
-  return false;
-}
-
 // A bundle the creator adds while streaming (a new source given the Bundle filter, or one put back
 // after its route ended) starts sending at once, not at the next Start Streaming (owner,
-// 2026-11-14). Each second, the local bundles in a scene with no running route are waiting; every
+// 2026-11-14). Every quarter second, the local bundles in a scene with no running route are waiting; every
 // 5 s, for up to a minute (a new filter's catalog save may still be on its way), their routes are
 // built from the catalog as at the start, added, and the feeds declared again to the show.
 struct PendingBundle {
@@ -1207,8 +1185,8 @@ void registerContributionOutput()
   obs_register_output(&outputInfo);
   // A bundle whose source the creator takes out of every scene stops (owner, 2026-11-14): the route
   // lets the source go, so OBS can destroy it and a camera's light goes off, instead of the stream
-  // holding it until Stop Streaming; and one added (or put back) starts sending. Each second while
-  // publishing.
+  // holding it until Stop Streaming; and one added (or put back) starts sending. Every quarter second
+  // while publishing, as the audio routes are (module.cpp), so either happens at once (owner).
   if (qApp) {
     auto *timer = new QTimer(qApp);
     QObject::connect(timer, &QTimer::timeout, [] {
@@ -1216,15 +1194,12 @@ void registerContributionOutput()
       for (auto *context : activeOutputs)
         if (context && context->publisher && context->publishing) {
           publishing = true;
-          context->publisher->endRoutesNotShown(shownLately);
+          context->publisher->endRoutesNotShown(bundleShown);
           addBundlesMidStream(context);
         }
-      if (!publishing) {
-        pendingBundles.clear();
-        unshownSinceMs.clear();
-      }
+      if (!publishing) pendingBundles.clear();
     });
-    timer->start(1000);
+    timer->start(250);
   }
 }
 
