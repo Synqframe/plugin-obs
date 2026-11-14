@@ -20,6 +20,7 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -718,7 +719,7 @@ ItemFlip sourceFlip(const QString &uuid)
 // One route per enabled bundle in the session's catalog that has a source in this OBS.
 // Nothing when at least one is added; otherwise why the stream can't start.
 std::optional<QString> addBundleRoutes(const ClientSettings &settings, int videoBitrate, int audioBitrate,
-                                       synqframe::ProgramConfig &config)
+                                       synqframe::ProgramConfig &config, bool warn = true)
 {
   QJsonArray bundles;
   QString catalogError;
@@ -798,7 +799,7 @@ std::optional<QString> addBundleRoutes(const ClientSettings &settings, int video
                        .arg(targetVideoBitrate)
                        .arg(recommendedBundleKbps(sourceWidth, sourceHeight, targetFpsNum / std::max(1, targetFpsDen)));
   }
-  if (!lowBitrates.isEmpty()) warnLowBitrates(lowBitrates);
+  if (warn && !lowBitrates.isEmpty()) warnLowBitrates(lowBitrates);
   const bool hasBundleRoute = std::any_of(config.routes.cbegin(), config.routes.cend(), [](const auto &route) {
     return route.id != "horizontal" && route.id != "vertical";
   });
@@ -1082,17 +1083,96 @@ static bool inSomeScene(obs_source_t *source)
   return found;
 }
 
+// A bundle the creator adds while streaming (a new source given the Bundle filter, or one put back
+// after its route ended) starts sending at once, not at the next Start Streaming (owner,
+// 2026-11-14). Each second, the local bundles in a scene with no running route are waiting; every
+// 5 s, for up to a minute (a new filter's catalog save may still be on its way), their routes are
+// built from the catalog as at the start, added, and the feeds declared again to the show.
+struct PendingBundle {
+  qint64 firstSeenMs = 0;
+  qint64 lastTryMs = 0;
+};
+static QHash<QString, PendingBundle> pendingBundles; // UI thread; cleared when nothing publishes
+
+static void addBundlesMidStream(ContributionOutput *context)
+{
+  synqframe::ProgramPublisher &publisher = *context->publisher;
+  ClientSettings settings = loadClientSettings();
+  if (settings.compositionMode == CompositionMode::Native) return;
+  const std::vector<std::string> running = publisher.runningRouteIds();
+  QString duplicate, error;
+  QSet<QString> waiting;
+  for (const LocalBundle &bundle : collectLocalBundles(duplicate, error, nullptr)) {
+    if (std::find(running.begin(), running.end(), bundle.id.toStdString()) != running.end()) continue;
+    obs_source_t *source = obs_get_source_by_uuid(bundle.sourceUuid.toUtf8().constData());
+    const bool shown = source && inSomeScene(source);
+    if (source) obs_source_release(source);
+    if (shown) waiting.insert(bundle.id);
+  }
+  for (auto it = pendingBundles.begin(); it != pendingBundles.end();)
+    it = waiting.contains(it.key()) ? std::next(it) : pendingBundles.erase(it);
+  if (waiting.isEmpty()) return;
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+  QSet<QString> due;
+  for (const QString &id : waiting) {
+    PendingBundle &pending = pendingBundles[id];
+    if (!pending.firstSeenMs) pending.firstSeenMs = now;
+    if (now - pending.firstSeenMs > 60000) continue; // given up: it rejoins at the next Start Streaming
+    if (pending.lastTryMs && now - pending.lastTryMs < 5000) continue;
+    pending.lastTryMs = now;
+    due.insert(id);
+  }
+  if (due.isEmpty()) return;
+  synqframe::ProgramConfig built;
+  int videoBitrate = settings.baseVideoBitrate;
+  int audioBitrate = settings.baseAudioBitrate;
+  readProfileBitrates(built, videoBitrate, audioBitrate);
+  addBundleRoutes(settings, videoBitrate, audioBitrate, built, false); // its "nothing to send" doesn't matter here
+  bool added = false;
+  for (const synqframe::PublishRouteConfig &route : built.routes) {
+    const QString id = QString::fromStdString(route.id);
+    if (!due.contains(id)) continue;
+    std::string why;
+    if (publisher.addRoute(route, why)) {
+      added = true;
+      pendingBundles.remove(id);
+    } else {
+      blog(LOG_WARNING, "[Synqframe] Bundle %s couldn't start while streaming: %s", route.id.c_str(), why.c_str());
+    }
+  }
+  if (!added) return;
+  QStringList ids;
+  for (const std::string &id : publisher.runningRouteIds())
+    if (id != "horizontal" && id != "vertical") ids << QString::fromStdString(id);
+  obs_video_info video{};
+  {
+    std::lock_guard lock(runningFeedsMutex);
+    runningFeeds.bundleIds = ids;
+    video = runningFeeds.video;
+  }
+  QString declareError;
+  if (!declareMediaProfileChannels(settings, ids, video, declareError))
+    blog(LOG_WARNING, "[Synqframe] The show wasn't told of the added bundle: %s", declareError.toUtf8().constData());
+}
+
 void registerContributionOutput()
 {
   obs_register_output(&outputInfo);
   // A bundle whose source the creator takes out of every scene stops (owner, 2026-11-14): the route
   // lets the source go, so OBS can destroy it and a camera's light goes off, instead of the stream
-  // holding it until Stop Streaming. Checked each second while publishing.
+  // holding it until Stop Streaming; and one added (or put back) starts sending. Each second while
+  // publishing.
   if (qApp) {
     auto *timer = new QTimer(qApp);
     QObject::connect(timer, &QTimer::timeout, [] {
+      bool publishing = false;
       for (auto *context : activeOutputs)
-        if (context && context->publisher) context->publisher->endRoutesNotShown(inSomeScene);
+        if (context && context->publisher && context->publishing) {
+          publishing = true;
+          context->publisher->endRoutesNotShown(inSomeScene);
+          addBundlesMidStream(context);
+        }
+      if (!publishing) pendingBundles.clear();
     });
     timer->start(1000);
   }

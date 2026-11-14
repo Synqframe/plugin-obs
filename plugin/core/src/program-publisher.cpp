@@ -141,6 +141,237 @@ ProgramPublisher::~ProgramPublisher()
   release();
 }
 
+// One route's output, service, view and encoders (start, addRoute). False with `error`: what was
+// made is in `item`, for the caller to release.
+bool ProgramPublisher::buildRoute(const PublishRouteConfig &bundle, ChannelOutput &item, std::string &error)
+{
+  item.channel = bundle.id;
+  const auto name = "Synqframe " + bundle.id;
+  item.output = obs_output_create("ffmpeg_mpegts_muxer", name.c_str(), nullptr, nullptr);
+  // OBS otherwise inherits the frontend's long exponential retry budget and
+  // eventually waits 900 seconds between attempts. Contribution routes use
+  // short-lived authenticated endpoints; bound recovery so an unavailable or
+  // rejected route becomes visible instead of remaining nominally active for
+  // hours with no media. Eight attempts cover roughly 100 seconds, enough for
+  // a typical transient ingest restart without entering minute-long sleeps.
+  if (item.output) obs_output_set_reconnect_settings(item.output, 8, 2);
+  // Every bundle frame carries its capture time so the compositor can line feeds up across
+  // players and ingests (vendor/synqframe-protocol/docs/capture-time-sei.md). OBS's own program (horizontal,
+  // vertical) is no feed: nothing reads its stamps.
+  if (item.output && bundle.id != "horizontal" && bundle.id != "vertical") {
+    item.stamper = std::make_shared<CaptureTimeStamper>();
+    item.stamper->attach(item.output);
+  }
+  auto settings = obs_data_create();
+  const auto endpoint = endpointFor(bundle.endpointTemplate.empty() ? config_.ingestUrl : bundle.endpointTemplate, bundle.id);
+  obs_data_set_string(settings, "server", endpoint.c_str());
+  item.service = obs_service_create("rtmp_custom", name.c_str(), settings, nullptr);
+  obs_data_release(settings);
+  if (!item.output || !item.service) {
+    error = "OBS SRT/MPEG-TS support is unavailable.";
+    return false;
+  }
+  obs_output_set_service(item.output, item.service);
+  const bool sharedProgram = bundle.id == "horizontal" && config_.sharedProgramVideoEncoder;
+  auto routedScene = routeSource(bundle, OBS_SOURCE_VIDEO);
+  if (!routedScene) {
+    error = "The source sending bundle " + bundle.id + " is gone";
+    return false;
+  }
+  if (sharedProgram) {
+    // OBS's frontend encoder already consumes the native program video. Share
+    // it with the SRT muxer exactly as OBS shares an encoder with recording,
+    // avoiding another scene render and hardware encode for horizontal.
+    item.videoEncoder = obs_encoder_get_ref(config_.sharedProgramVideoEncoder);
+    obs_output_set_video_encoder(item.output, item.videoEncoder);
+  } else {
+    // Render the routed scene or source itself. Unwrapping a one-item scene to its
+    // leaf source discards that item's crop, scale, rotation, and positioning.
+    // It also makes a full-resolution media source render directly into the
+    // smaller Local-analysis canvas, which clips instead of downscaling.
+    auto videoSource = obs_source_get_ref(routedScene);
+    const uint32_t sourceWidth = obs_source_get_width(videoSource);
+    const uint32_t sourceHeight = obs_source_get_height(videoSource);
+    uint32_t canvasWidth = std::max(1u, sourceWidth);
+    uint32_t canvasHeight = std::max(1u, sourceHeight);
+    // A source with no size yet (a game capture that hasn't hooked): a canvas of its size would
+    // be 1x1, its one pixel stretched over the bundle (2026-10-27: a flat colour for 9 minutes).
+    // Instead it goes in a scene of the bundle's own size, fitted within its bounds as it
+    // appears, at whatever size that turns out to be.
+    if (sourceWidth == 0 || sourceHeight == 0) {
+      blog(LOG_WARNING, "[Synqframe] Bundle %s: its source has no size yet (a capture not hooked?); fitting it to %dx%d",
+           bundle.id.c_str(), bundle.width, bundle.height);
+      canvasWidth = (uint32_t)bundle.width;
+      canvasHeight = (uint32_t)bundle.height;
+      if (auto *fitScene = obs_scene_create_private((name + " fit").c_str())) {
+        if (auto *fitted = obs_scene_add(fitScene, videoSource)) {
+          const vec2 origin{0.0f, 0.0f};
+          const vec2 bounds{(float)canvasWidth, (float)canvasHeight};
+          obs_sceneitem_set_alignment(fitted, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+          obs_sceneitem_set_pos(fitted, &origin);
+          obs_sceneitem_set_bounds_type(fitted, OBS_BOUNDS_SCALE_INNER);
+          obs_sceneitem_set_bounds_alignment(fitted, OBS_ALIGN_CENTER);
+          obs_sceneitem_set_bounds(fitted, &bounds);
+        }
+        item.fitSource = obs_source_get_ref(obs_scene_get_source(fitScene));
+        obs_source_release(videoSource);
+        videoSource = obs_source_get_ref(item.fitSource);
+        obs_scene_release(fitScene);
+      }
+    }
+    // Flipped in OBS (a mirrored camera): the source in a scene of its own, flipped within
+    // bounds of its own size so it stays in place, as OBS's own flip does.
+    if (bundle.flipX || bundle.flipY) {
+      auto *flipScene = obs_scene_create_private((name + " flip").c_str());
+      if (flipScene) {
+        if (auto *flipped = obs_scene_add(flipScene, videoSource)) {
+          const vec2 origin{0.0f, 0.0f};
+          const vec2 bounds{(float)canvasWidth, (float)canvasHeight};
+          const vec2 scale{bundle.flipX ? -1.0f : 1.0f, bundle.flipY ? -1.0f : 1.0f};
+          obs_sceneitem_set_alignment(flipped, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+          obs_sceneitem_set_pos(flipped, &origin);
+          obs_sceneitem_set_bounds_type(flipped, OBS_BOUNDS_STRETCH);
+          obs_sceneitem_set_bounds_alignment(flipped, OBS_ALIGN_CENTER);
+          obs_sceneitem_set_bounds(flipped, &bounds);
+          obs_sceneitem_set_scale(flipped, &scale);
+        }
+        item.flipSource = obs_source_get_ref(obs_scene_get_source(flipScene));
+        obs_source_release(videoSource);
+        videoSource = obs_source_get_ref(item.flipSource);
+        obs_scene_release(flipScene);
+      }
+    }
+    if (bundle.chromaBackground) {
+      const auto sceneName = name + " canvas";
+      auto *composite = obs_scene_create_private(sceneName.c_str());
+      auto *colorSettings = obs_data_create();
+      obs_data_set_int(colorSettings, "width", bundle.width);
+      obs_data_set_int(colorSettings, "height", bundle.height);
+      obs_data_set_int(colorSettings, "color", bundle.backgroundColor);
+      auto *matte = obs_source_create_private("color_source_v3", (name + " matte").c_str(), colorSettings);
+      obs_data_release(colorSettings);
+      if (composite && matte) {
+        obs_scene_add(composite, matte);
+        obs_scene_add(composite, videoSource);
+        item.compositeSource = obs_source_get_ref(obs_scene_get_source(composite));
+        obs_source_release(videoSource);
+        videoSource = obs_source_get_ref(item.compositeSource);
+      }
+      if (matte) obs_source_release(matte);
+      if (composite) obs_scene_release(composite);
+    }
+    // Packed alpha: the picture over black on top, its alpha as grey below (synqframe/packed-alpha.hpp).
+    const bool packed = bundle.packedAlpha && !bundle.chromaBackground;
+    if (packed) {
+      auto *alphaScene = obs_scene_create_private((name + " alpha").c_str());
+      auto *packScene = obs_scene_create_private((name + " packed").c_str());
+      auto *pack = obs_source_create_private(packed_alpha::PackFilterId, (name + " alpha luma").c_str(), nullptr);
+      if (alphaScene && packScene && pack) {
+        obs_scene_add(alphaScene, videoSource);
+        obs_source_filter_add(obs_scene_get_source(alphaScene), pack);
+        obs_scene_add(packScene, videoSource);
+        if (auto *lower = obs_scene_add(packScene, obs_scene_get_source(alphaScene))) {
+          const vec2 below{0.0f, (float)canvasHeight};
+          obs_sceneitem_set_pos(lower, &below);
+        }
+        item.alphaSource = obs_source_get_ref(obs_scene_get_source(alphaScene));
+        item.packSource = obs_source_get_ref(obs_scene_get_source(packScene));
+        obs_source_release(videoSource);
+        videoSource = obs_source_get_ref(item.packSource);
+      } else {
+        blog(LOG_WARNING, "[Synqframe] Bundle %s: packed alpha unavailable (no pack filter); sending it opaque",
+             bundle.id.c_str());
+      }
+      if (pack) obs_source_release(pack);
+      if (packScene) obs_scene_release(packScene);
+      if (alphaScene) obs_scene_release(alphaScene);
+    }
+    item.view = obs_view_create();
+    obs_view_set_source(item.view, 0, videoSource);
+    obs_video_info info{};
+    obs_get_video_info(&info);
+    // Base size is the authoritative OBS canvas. The output size is merely the
+    // transport/analysis rendition. Let libobs scale between them so source
+    // transforms remain expressed in the source's own coordinates.
+    info.base_width = canvasWidth;
+    info.base_height = item.packSource ? canvasHeight * 2 : canvasHeight;
+    info.output_width = (uint32_t)bundle.width;
+    info.output_height = (uint32_t)(item.packSource ? bundle.height * 2 : bundle.height);
+    // OBS's main graphics thread clocks every auxiliary view at the base canvas
+    // rate. Opening an aux video output at 30 fps while the main canvas is 60
+    // yields 30 packets stamped on a 60-fps timebase, so video advances at half
+    // real time. Keep the view on the main clock and use the encoder's native
+    // frame-rate divisor to produce correctly timestamped lower-rate routes.
+    const double mainFps = static_cast<double>(info.fps_num) / std::max(1u, info.fps_den);
+    const double targetFps = static_cast<double>(bundle.fpsNum) / std::max(1, bundle.fpsDen);
+    const uint32_t fpsDivisor =
+      targetFps > 0.0 && targetFps < mainFps ? std::max(1u, static_cast<uint32_t>(std::lround(mainFps / targetFps))) : 1u;
+    blog(LOG_INFO, "[Synqframe] Bundle %s: source %ux%u, canvas %ux%u, sent %ux%u at %.2f fps (OBS %.2f, every %u)",
+         bundle.id.c_str(), sourceWidth, sourceHeight, info.base_width, info.base_height, info.output_width,
+         info.output_height, mainFps / fpsDivisor, mainFps, fpsDivisor);
+    item.video = obs_view_add2(item.view, &info);
+    obs_source_release(videoSource);
+    settings = config_.videoEncoderSettings.empty() ? obs_data_create()
+                                                    : obs_data_create_from_json(config_.videoEncoderSettings.c_str());
+    if (!settings) settings = obs_data_create();
+    obs_data_set_default_string(settings, "rate_control", "CBR");
+    obs_data_set_int(settings, "bitrate", bundle.videoBitrateKbps);
+    obs_data_set_int(settings, "keyint_sec", 1);
+    obs_data_set_bool(settings, "repeat_headers", true);
+    obs_data_set_int(settings, "bf", 0);
+    if (bundle.performanceGrade) {
+      // Each encoder family's own fast preset: AMF "speed", NVENC "p2", x264 "veryfast".
+      if (videoId_.find("amf") != std::string::npos) obs_data_set_string(settings, "preset", "speed");
+      else if (videoId_.find("nvenc") != std::string::npos) obs_data_set_string(settings, "preset", "p2");
+      else if (videoId_.find("x264") != std::string::npos) obs_data_set_string(settings, "preset", "veryfast");
+    }
+    item.videoEncoder = obs_video_encoder_create(videoId_.c_str(), name.c_str(), settings, nullptr);
+    obs_data_release(settings);
+    if (item.videoEncoder) {
+      obs_encoder_set_video(item.videoEncoder, item.video);
+      obs_encoder_set_frame_rate_divisor(item.videoEncoder, fpsDivisor);
+    }
+    if (item.videoEncoder) obs_output_set_video_encoder(item.output, item.videoEncoder);
+  }
+  auto audioSources = collectRouteAudio(bundle);
+  obs_source_release(routedScene);
+  // The first mix neither reserved nor another running route's (an ended route's is free again).
+  size_t mix = 0;
+  while (mix < MAX_AUDIO_MIXES && ((config_.reservedMixes | mixesUsed_) & (1u << mix))) ++mix;
+  if (mix >= MAX_AUDIO_MIXES) {
+    error = "Too many contribution bundles.";
+    return false;
+  }
+  mixesUsed_ |= 1u << mix;
+  item.mix = (uint32_t)mix;
+  configureSceneAudioMix((uint32_t)mix, audioSources, item.audioRoutes);
+  item.audioMemberUuids = audioMemberUuids(audioSources);
+  for (auto *source : audioSources) obs_source_release(source);
+  settings = obs_data_create();
+  obs_data_set_int(settings, "bitrate", bundle.audioBitrateKbps);
+  item.audioEncoder =
+    obs_audio_encoder_create(audioEncoderFor(bundle.audioCodec).c_str(), name.c_str(), settings, mix, nullptr);
+  obs_data_release(settings);
+  if (item.audioEncoder) obs_encoder_set_audio(item.audioEncoder, obs_get_audio());
+  if (item.audioEncoder) obs_output_set_audio_encoder(item.output, item.audioEncoder, 0);
+  if (!item.videoEncoder || !item.audioEncoder || (!sharedProgram && (!item.view || !item.video))) {
+    error = "Could not create the A/V encoders for contribution bundle " + bundle.id;
+    return false;
+  }
+  // A local ISO recording of this route: the same encoders, into a file. Never fatal.
+  if (!bundle.isoPath.empty()) {
+    auto *isoSettings = obs_data_create();
+    obs_data_set_string(isoSettings, "path", bundle.isoPath.c_str());
+    item.isoOutput = obs_output_create("ffmpeg_muxer", (name + " recording").c_str(), isoSettings, nullptr);
+    obs_data_release(isoSettings);
+    if (item.isoOutput) {
+      obs_output_set_video_encoder(item.isoOutput, item.videoEncoder);
+      obs_output_set_audio_encoder(item.isoOutput, item.audioEncoder, 0);
+    } else blog(LOG_WARNING, "[Synqframe] No recording of bundle %s: OBS has no file muxer", bundle.id.c_str());
+  }
+  return true;
+}
+
 bool ProgramPublisher::start(std::string &error)
 {
   if (active()) return true;
@@ -172,240 +403,14 @@ bool ProgramPublisher::start(std::string &error)
   if (obs_get_audio_info(&audioInfo) && audioInfo.samples_per_sec != 48000)
     blog(LOG_WARNING, "[Synqframe] OBS audio is %u Hz; program audio should be 48000 Hz (Settings > Audio > Sample Rate)",
          audioInfo.samples_per_sec);
-  size_t mix = 0;
-  const auto skipReserved = [&] {
-    while (mix < MAX_AUDIO_MIXES && (config_.reservedMixes & (1u << mix))) ++mix;
-  };
+  mixesUsed_ = 0;
+  videoId_ = videoId;
   for (const auto &bundle : config_.routes) {
     ChannelOutput item;
-    item.channel = bundle.id;
-    const auto name = "Synqframe " + bundle.id;
-    item.output = obs_output_create("ffmpeg_mpegts_muxer", name.c_str(), nullptr, nullptr);
-    // OBS otherwise inherits the frontend's long exponential retry budget and
-    // eventually waits 900 seconds between attempts. Contribution routes use
-    // short-lived authenticated endpoints; bound recovery so an unavailable or
-    // rejected route becomes visible instead of remaining nominally active for
-    // hours with no media. Eight attempts cover roughly 100 seconds, enough for
-    // a typical transient ingest restart without entering minute-long sleeps.
-    if (item.output) obs_output_set_reconnect_settings(item.output, 8, 2);
-    // Every bundle frame carries its capture time so the compositor can line feeds up across
-    // players and ingests (vendor/synqframe-protocol/docs/capture-time-sei.md). OBS's own program (horizontal,
-    // vertical) is no feed: nothing reads its stamps.
-    if (item.output && bundle.id != "horizontal" && bundle.id != "vertical") {
-      item.stamper = std::make_shared<CaptureTimeStamper>();
-      item.stamper->attach(item.output);
-    }
-    auto settings = obs_data_create();
-    const auto endpoint = endpointFor(bundle.endpointTemplate.empty() ? config_.ingestUrl : bundle.endpointTemplate, bundle.id);
-    obs_data_set_string(settings, "server", endpoint.c_str());
-    item.service = obs_service_create("rtmp_custom", name.c_str(), settings, nullptr);
-    obs_data_release(settings);
-    if (!item.output || !item.service) {
+    if (!buildRoute(bundle, item, error)) {
       outputs_.push_back(item);
-      error = "OBS SRT/MPEG-TS support is unavailable.";
       release();
       return false;
-    }
-    obs_output_set_service(item.output, item.service);
-    const bool sharedProgram = bundle.id == "horizontal" && config_.sharedProgramVideoEncoder;
-    auto routedScene = routeSource(bundle, OBS_SOURCE_VIDEO);
-    if (!routedScene) {
-      outputs_.push_back(item);
-      error = "The source sending bundle " + bundle.id + " is gone";
-      release();
-      return false;
-    }
-    if (sharedProgram) {
-      // OBS's frontend encoder already consumes the native program video. Share
-      // it with the SRT muxer exactly as OBS shares an encoder with recording,
-      // avoiding another scene render and hardware encode for horizontal.
-      item.videoEncoder = obs_encoder_get_ref(config_.sharedProgramVideoEncoder);
-      obs_output_set_video_encoder(item.output, item.videoEncoder);
-    } else {
-      // Render the routed scene or source itself. Unwrapping a one-item scene to its
-      // leaf source discards that item's crop, scale, rotation, and positioning.
-      // It also makes a full-resolution media source render directly into the
-      // smaller Local-analysis canvas, which clips instead of downscaling.
-      auto videoSource = obs_source_get_ref(routedScene);
-      const uint32_t sourceWidth = obs_source_get_width(videoSource);
-      const uint32_t sourceHeight = obs_source_get_height(videoSource);
-      uint32_t canvasWidth = std::max(1u, sourceWidth);
-      uint32_t canvasHeight = std::max(1u, sourceHeight);
-      // A source with no size yet (a game capture that hasn't hooked): a canvas of its size would
-      // be 1x1, its one pixel stretched over the bundle (2026-10-27: a flat colour for 9 minutes).
-      // Instead it goes in a scene of the bundle's own size, fitted within its bounds as it
-      // appears, at whatever size that turns out to be.
-      if (sourceWidth == 0 || sourceHeight == 0) {
-        blog(LOG_WARNING, "[Synqframe] Bundle %s: its source has no size yet (a capture not hooked?); fitting it to %dx%d",
-             bundle.id.c_str(), bundle.width, bundle.height);
-        canvasWidth = (uint32_t)bundle.width;
-        canvasHeight = (uint32_t)bundle.height;
-        if (auto *fitScene = obs_scene_create_private((name + " fit").c_str())) {
-          if (auto *fitted = obs_scene_add(fitScene, videoSource)) {
-            const vec2 origin{0.0f, 0.0f};
-            const vec2 bounds{(float)canvasWidth, (float)canvasHeight};
-            obs_sceneitem_set_alignment(fitted, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
-            obs_sceneitem_set_pos(fitted, &origin);
-            obs_sceneitem_set_bounds_type(fitted, OBS_BOUNDS_SCALE_INNER);
-            obs_sceneitem_set_bounds_alignment(fitted, OBS_ALIGN_CENTER);
-            obs_sceneitem_set_bounds(fitted, &bounds);
-          }
-          item.fitSource = obs_source_get_ref(obs_scene_get_source(fitScene));
-          obs_source_release(videoSource);
-          videoSource = obs_source_get_ref(item.fitSource);
-          obs_scene_release(fitScene);
-        }
-      }
-      // Flipped in OBS (a mirrored camera): the source in a scene of its own, flipped within
-      // bounds of its own size so it stays in place, as OBS's own flip does.
-      if (bundle.flipX || bundle.flipY) {
-        auto *flipScene = obs_scene_create_private((name + " flip").c_str());
-        if (flipScene) {
-          if (auto *flipped = obs_scene_add(flipScene, videoSource)) {
-            const vec2 origin{0.0f, 0.0f};
-            const vec2 bounds{(float)canvasWidth, (float)canvasHeight};
-            const vec2 scale{bundle.flipX ? -1.0f : 1.0f, bundle.flipY ? -1.0f : 1.0f};
-            obs_sceneitem_set_alignment(flipped, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
-            obs_sceneitem_set_pos(flipped, &origin);
-            obs_sceneitem_set_bounds_type(flipped, OBS_BOUNDS_STRETCH);
-            obs_sceneitem_set_bounds_alignment(flipped, OBS_ALIGN_CENTER);
-            obs_sceneitem_set_bounds(flipped, &bounds);
-            obs_sceneitem_set_scale(flipped, &scale);
-          }
-          item.flipSource = obs_source_get_ref(obs_scene_get_source(flipScene));
-          obs_source_release(videoSource);
-          videoSource = obs_source_get_ref(item.flipSource);
-          obs_scene_release(flipScene);
-        }
-      }
-      if (bundle.chromaBackground) {
-        const auto sceneName = name + " canvas";
-        auto *composite = obs_scene_create_private(sceneName.c_str());
-        auto *colorSettings = obs_data_create();
-        obs_data_set_int(colorSettings, "width", bundle.width);
-        obs_data_set_int(colorSettings, "height", bundle.height);
-        obs_data_set_int(colorSettings, "color", bundle.backgroundColor);
-        auto *matte = obs_source_create_private("color_source_v3", (name + " matte").c_str(), colorSettings);
-        obs_data_release(colorSettings);
-        if (composite && matte) {
-          obs_scene_add(composite, matte);
-          obs_scene_add(composite, videoSource);
-          item.compositeSource = obs_source_get_ref(obs_scene_get_source(composite));
-          obs_source_release(videoSource);
-          videoSource = obs_source_get_ref(item.compositeSource);
-        }
-        if (matte) obs_source_release(matte);
-        if (composite) obs_scene_release(composite);
-      }
-      // Packed alpha: the picture over black on top, its alpha as grey below (synqframe/packed-alpha.hpp).
-      const bool packed = bundle.packedAlpha && !bundle.chromaBackground;
-      if (packed) {
-        auto *alphaScene = obs_scene_create_private((name + " alpha").c_str());
-        auto *packScene = obs_scene_create_private((name + " packed").c_str());
-        auto *pack = obs_source_create_private(packed_alpha::PackFilterId, (name + " alpha luma").c_str(), nullptr);
-        if (alphaScene && packScene && pack) {
-          obs_scene_add(alphaScene, videoSource);
-          obs_source_filter_add(obs_scene_get_source(alphaScene), pack);
-          obs_scene_add(packScene, videoSource);
-          if (auto *lower = obs_scene_add(packScene, obs_scene_get_source(alphaScene))) {
-            const vec2 below{0.0f, (float)canvasHeight};
-            obs_sceneitem_set_pos(lower, &below);
-          }
-          item.alphaSource = obs_source_get_ref(obs_scene_get_source(alphaScene));
-          item.packSource = obs_source_get_ref(obs_scene_get_source(packScene));
-          obs_source_release(videoSource);
-          videoSource = obs_source_get_ref(item.packSource);
-        } else {
-          blog(LOG_WARNING, "[Synqframe] Bundle %s: packed alpha unavailable (no pack filter); sending it opaque",
-               bundle.id.c_str());
-        }
-        if (pack) obs_source_release(pack);
-        if (packScene) obs_scene_release(packScene);
-        if (alphaScene) obs_scene_release(alphaScene);
-      }
-      item.view = obs_view_create();
-      obs_view_set_source(item.view, 0, videoSource);
-      obs_video_info info{};
-      obs_get_video_info(&info);
-      // Base size is the authoritative OBS canvas. The output size is merely the
-      // transport/analysis rendition. Let libobs scale between them so source
-      // transforms remain expressed in the source's own coordinates.
-      info.base_width = canvasWidth;
-      info.base_height = item.packSource ? canvasHeight * 2 : canvasHeight;
-      info.output_width = (uint32_t)bundle.width;
-      info.output_height = (uint32_t)(item.packSource ? bundle.height * 2 : bundle.height);
-      // OBS's main graphics thread clocks every auxiliary view at the base canvas
-      // rate. Opening an aux video output at 30 fps while the main canvas is 60
-      // yields 30 packets stamped on a 60-fps timebase, so video advances at half
-      // real time. Keep the view on the main clock and use the encoder's native
-      // frame-rate divisor to produce correctly timestamped lower-rate routes.
-      const double mainFps = static_cast<double>(info.fps_num) / std::max(1u, info.fps_den);
-      const double targetFps = static_cast<double>(bundle.fpsNum) / std::max(1, bundle.fpsDen);
-      const uint32_t fpsDivisor =
-        targetFps > 0.0 && targetFps < mainFps ? std::max(1u, static_cast<uint32_t>(std::lround(mainFps / targetFps))) : 1u;
-      blog(LOG_INFO, "[Synqframe] Bundle %s: source %ux%u, canvas %ux%u, sent %ux%u at %.2f fps (OBS %.2f, every %u)",
-           bundle.id.c_str(), sourceWidth, sourceHeight, info.base_width, info.base_height, info.output_width,
-           info.output_height, mainFps / fpsDivisor, mainFps, fpsDivisor);
-      item.video = obs_view_add2(item.view, &info);
-      obs_source_release(videoSource);
-      settings = config_.videoEncoderSettings.empty() ? obs_data_create()
-                                                      : obs_data_create_from_json(config_.videoEncoderSettings.c_str());
-      if (!settings) settings = obs_data_create();
-      obs_data_set_default_string(settings, "rate_control", "CBR");
-      obs_data_set_int(settings, "bitrate", bundle.videoBitrateKbps);
-      obs_data_set_int(settings, "keyint_sec", 1);
-      obs_data_set_bool(settings, "repeat_headers", true);
-      obs_data_set_int(settings, "bf", 0);
-      if (bundle.performanceGrade) {
-        // Each encoder family's own fast preset: AMF "speed", NVENC "p2", x264 "veryfast".
-        if (videoId.find("amf") != std::string::npos) obs_data_set_string(settings, "preset", "speed");
-        else if (videoId.find("nvenc") != std::string::npos) obs_data_set_string(settings, "preset", "p2");
-        else if (videoId.find("x264") != std::string::npos) obs_data_set_string(settings, "preset", "veryfast");
-      }
-      item.videoEncoder = obs_video_encoder_create(videoId.c_str(), name.c_str(), settings, nullptr);
-      obs_data_release(settings);
-      if (item.videoEncoder) {
-        obs_encoder_set_video(item.videoEncoder, item.video);
-        obs_encoder_set_frame_rate_divisor(item.videoEncoder, fpsDivisor);
-      }
-      if (item.videoEncoder) obs_output_set_video_encoder(item.output, item.videoEncoder);
-    }
-    auto audioSources = collectRouteAudio(bundle);
-    obs_source_release(routedScene);
-    skipReserved();
-    if (mix >= MAX_AUDIO_MIXES) {
-      outputs_.push_back(item);
-      error = "Too many contribution bundles.";
-      release();
-      return false;
-    }
-    item.mix = (uint32_t)mix;
-    configureSceneAudioMix((uint32_t)mix, audioSources, item.audioRoutes);
-    item.audioMemberUuids = audioMemberUuids(audioSources);
-    for (auto *source : audioSources) obs_source_release(source);
-    settings = obs_data_create();
-    obs_data_set_int(settings, "bitrate", bundle.audioBitrateKbps);
-    item.audioEncoder =
-      obs_audio_encoder_create(audioEncoderFor(bundle.audioCodec).c_str(), name.c_str(), settings, mix++, nullptr);
-    obs_data_release(settings);
-    if (item.audioEncoder) obs_encoder_set_audio(item.audioEncoder, obs_get_audio());
-    if (item.audioEncoder) obs_output_set_audio_encoder(item.output, item.audioEncoder, 0);
-    if (!item.videoEncoder || !item.audioEncoder || (!sharedProgram && (!item.view || !item.video))) {
-      outputs_.push_back(item);
-      error = "Could not create the A/V encoders for contribution bundle " + bundle.id;
-      release();
-      return false;
-    }
-    // A local ISO recording of this route: the same encoders, into a file. Never fatal.
-    if (!bundle.isoPath.empty()) {
-      auto *isoSettings = obs_data_create();
-      obs_data_set_string(isoSettings, "path", bundle.isoPath.c_str());
-      item.isoOutput = obs_output_create("ffmpeg_muxer", (name + " recording").c_str(), isoSettings, nullptr);
-      obs_data_release(isoSettings);
-      if (item.isoOutput) {
-        obs_output_set_video_encoder(item.isoOutput, item.videoEncoder);
-        obs_output_set_audio_encoder(item.isoOutput, item.audioEncoder, 0);
-      } else blog(LOG_WARNING, "[Synqframe] No recording of bundle %s: OBS has no file muxer", bundle.id.c_str());
     }
     outputs_.push_back(item);
   }
@@ -441,9 +446,14 @@ void ProgramPublisher::stop()
 
 void ProgramPublisher::watchSources()
 {
-  for (size_t index = 0; index < outputs_.size() && index < config_.routes.size(); ++index) {
+  for (size_t index = 0; index < outputs_.size() && index < config_.routes.size(); ++index) watchRoute(index);
+}
+
+void ProgramPublisher::watchRoute(size_t index)
+{
+  {
     auto *source = routeSource(config_.routes[index], OBS_SOURCE_VIDEO);
-    if (!source) continue;
+    if (!source) return;
     auto watch = std::make_unique<RemoveWatch>();
     watch->self = this;
     watch->index = index;
@@ -513,6 +523,7 @@ void ProgramPublisher::endRoute(size_t index, const char *why)
   if (index >= outputs_.size() || outputs_[index].removed) return;
   auto &item = outputs_[index];
   item.removed = true;
+  mixesUsed_ &= ~(1u << item.mix);
   blog(LOG_WARNING, "[Synqframe] Bundle %s stopped: %s (the others carry on until Stop Streaming)", item.channel.c_str(), why);
   if (item.isoOutput) obs_output_stop(item.isoOutput);
   if (item.output) obs_output_stop(item.output);
@@ -545,6 +556,59 @@ void ProgramPublisher::endRoute(size_t index, const char *why)
     }
   item.audioRoutes.clear();
   item.audioMemberUuids.clear();
+}
+
+bool ProgramPublisher::addRoute(const PublishRouteConfig &route, std::string &error)
+{
+  if (outputs_.empty() || videoId_.empty()) {
+    error = "not publishing";
+    return false;
+  }
+  if (audioEncoderFor(route.audioCodec).empty()) {
+    error = "OBS has no audio encoder for route " + route.id;
+    return false;
+  }
+  ChannelOutput item;
+  bool built;
+  {
+    std::lock_guard lock(mutex_);
+    const uint32_t mixesBefore = mixesUsed_;
+    built = buildRoute(route, item, error);
+    if (!built) {
+      mixesUsed_ = mixesBefore;
+      releaseItem(item);
+    }
+  }
+  if (!built) return false;
+  if (!obs_output_start(item.output)) {
+    const char *detail = obs_output_get_last_error(item.output);
+    error = item.channel + ": " + (detail && *detail ? detail : "could not start SRT output");
+    std::lock_guard lock(mutex_);
+    mixesUsed_ &= ~(1u << item.mix);
+    releaseItem(item);
+    return false;
+  }
+  if (item.isoOutput && !obs_output_start(item.isoOutput))
+    blog(LOG_WARNING, "[Synqframe] Could not record %s to a file", item.channel.c_str());
+  size_t index;
+  {
+    std::lock_guard lock(mutex_);
+    config_.routes.push_back(route);
+    outputs_.push_back(item);
+    index = outputs_.size() - 1;
+  }
+  watchRoute(index);
+  blog(LOG_INFO, "[Synqframe] Bundle %s added while streaming", route.id.c_str());
+  return true;
+}
+
+std::vector<std::string> ProgramPublisher::runningRouteIds() const
+{
+  std::lock_guard lock(mutex_);
+  std::vector<std::string> ids;
+  for (const auto &item : outputs_)
+    if (!item.removed) ids.push_back(item.channel);
+  return ids;
 }
 
 void ProgramPublisher::endRoutesNotShown(const std::function<bool(obs_source *)> &shown)
@@ -599,7 +663,14 @@ void ProgramPublisher::release()
 {
   unwatchSources();
   std::lock_guard lock(mutex_);
-  for (auto item = outputs_.rbegin(); item != outputs_.rend(); ++item) {
+  for (auto item = outputs_.rbegin(); item != outputs_.rend(); ++item) releaseItem(*item);
+  outputs_.clear();
+}
+
+void ProgramPublisher::releaseItem(ChannelOutput &output)
+{
+  {
+    ChannelOutput *item = &output;
     if (item->isoOutput) {
       if (obs_output_active(item->isoOutput)) obs_output_force_stop(item->isoOutput);
       obs_output_release(item->isoOutput);
@@ -627,6 +698,6 @@ void ProgramPublisher::release()
     if (item->packSource) obs_source_release(item->packSource);
     if (item->alphaSource) obs_source_release(item->alphaSource);
   }
-  outputs_.clear();
+  output = ChannelOutput{};
 }
 } // namespace synqframe
