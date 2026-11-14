@@ -874,9 +874,10 @@ void applyLayoutScene(obs_scene_t *scene, const QJsonObject &document, const QSt
       context.slotIndexByBundle.insert(sourceId, slotIndex);
     }
   }
-  // A scene of ours shows every bundle and page its layout places: one it doesn't hold yet is
-  // added, and a page the layout no longer places goes (a bundle stays: its source is the
-  // creator's own).
+  // A scene of ours shows every page and text its layout places: one it doesn't hold yet is added,
+  // and one the layout no longer places goes. A bundle is added once per scene (its source is the
+  // creator's own): the scene remembers it held it (synqframe_placed_bundles), so a bundle the
+  // creator removes stays removed instead of coming back at the next layout (owner, 2026-11-14).
   if (addMissing) {
     struct Present {
       QSet<QString> ids;
@@ -899,16 +900,46 @@ void applyLayoutScene(obs_scene_t *scene, const QJsonObject &document, const QSt
       },
       &present);
     for (obs_sceneitem_t *item : present.stalePages) obs_sceneitem_remove(item);
+    obs_data_t *settings = obs_source_get_private_settings(obs_scene_get_source(scene));
+    obs_data_array_t *placedBundles = obs_data_get_array(settings, "synqframe_placed_bundles");
+    if (!placedBundles) placedBundles = obs_data_array_create();
+    QSet<QString> placedBefore;
+    for (size_t i = 0; i < obs_data_array_count(placedBundles); ++i) {
+      obs_data_t *entry = obs_data_array_item(placedBundles, i);
+      placedBefore.insert(QString::fromUtf8(obs_data_get_string(entry, "id")));
+      obs_data_release(entry);
+    }
+    const auto rememberBundle = [&](const QString &id) {
+      if (placedBefore.contains(id)) return;
+      placedBefore.insert(id);
+      obs_data_t *entry = obs_data_create();
+      obs_data_set_string(entry, "id", id.toUtf8().constData());
+      obs_data_array_push_back(placedBundles, entry);
+      obs_data_release(entry);
+    };
     for (auto it = context.itemsByBundle.cbegin(); it != context.itemsByBundle.cend(); ++it) {
-      if (present.ids.contains(it.key())) continue;
-      obs_source_t *source = bundleSourceFor(it.key());
+      obs_source_t *bundle = bundleSourceFor(it.key());
+      if (present.ids.contains(it.key())) {
+        if (bundle) rememberBundle(it.key());
+        if (bundle) obs_source_release(bundle);
+        continue;
+      }
+      obs_source_t *source = bundle;
+      if (source && placedBefore.contains(it.key())) { // the creator took it out: left out
+        obs_source_release(source);
+        continue;
+      }
       if (!source) source = pageSourceFor(it.key());
       if (!source) source = textSourceFor(it.key());
       if (source) {
         obs_scene_add(scene, source);
+        if (bundle) rememberBundle(it.key());
         obs_source_release(source);
       }
     }
+    obs_data_set_array(settings, "synqframe_placed_bundles", placedBundles);
+    obs_data_array_release(placedBundles);
+    obs_data_release(settings);
   }
   // A slot with filters is a group holding its item (slot-groups.hpp): an item not yet in one is
   // put in one. A group stays once made, filters or none, as the creator may have made it.
@@ -961,6 +992,10 @@ void applyCentralLayout(const QJsonObject &document)
     scenes.insert(scene.value("key").toString(), scene);
   }
   webScenes.clear();
+  // layoutScenes present but empty: this layout has no scenes of its own (Just Chatting after a
+  // game's pack), so the scenes we made for another are put away like any the web drops. Absent (a
+  // server from before scenes): the scenes are left as they are.
+  const bool layoutListsScenes = document.value("layoutScenes").isArray();
   for (const QJsonValue &value : document.value("layoutScenes").toArray()) {
     const QJsonObject scene = value.toObject();
     const QJsonObject keys = scene.value("keys").toObject();
@@ -991,6 +1026,13 @@ void applyCentralLayout(const QJsonObject &document)
         obs_source_release(source);
       }
   } else {
+    if (layoutListsScenes) {
+      syncCanvasScenes(false);
+      if (obs_canvas_t *canvas = getVerticalLayoutCanvas()) {
+        obs_canvas_release(canvas);
+        syncCanvasScenes(true);
+      }
+    }
     obs_source_t *horizontalSource = obs_frontend_get_current_scene();
     if (horizontalSource) {
       applyLayoutScene(obs_scene_from_source(horizontalSource), scenes.value("horizontal"), viewerId);
