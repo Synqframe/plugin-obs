@@ -762,6 +762,18 @@ std::optional<QString> addBundleRoutes(const ClientSettings &settings, int video
       }
       obs_source_release(mapped);
     }
+    // An empty group isn't sent until it shows something (the mid-stream add starts it then): the
+    // publisher never puts a group in a scene of its own, and there's nothing to size it by yet.
+    if (obs_source_t *routed = obs_get_source_by_uuid(uuid.toUtf8().constData())) {
+      const bool emptyGroup =
+        obs_source_is_group(routed) && (obs_source_get_width(routed) == 0 || obs_source_get_height(routed) == 0);
+      obs_source_release(routed);
+      if (emptyGroup) {
+        blog(LOG_INFO, "[Synqframe] Bundle '%s' is an empty group: it starts once it shows something",
+             id.toUtf8().constData());
+        continue;
+      }
+    }
     const QJsonObject target = bundle.value(QStringLiteral("video")).toObject();
     const QJsonObject audio = bundle.value(QStringLiteral("audio")).toObject();
     const QJsonObject background = bundle.value(QStringLiteral("background")).toObject();

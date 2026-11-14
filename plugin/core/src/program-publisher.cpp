@@ -208,6 +208,20 @@ bool ProgramPublisher::buildRoute(const PublishRouteConfig &bundle, ChannelOutpu
     const uint32_t sourceHeight = obs_source_get_height(videoSource);
     uint32_t canvasWidth = std::max(1u, sourceWidth);
     uint32_t canvasHeight = std::max(1u, sourceHeight);
+    // A group is never put in a scene of ours (to fit, flip or matte it): a group belongs to one scene,
+    // and adding it to another left it drawing none of its items in OBS after ours went, so even a new
+    // camera put in it stayed invisible (owner, 2026-11-14). An empty one isn't sent until it shows
+    // something (the mid-stream add); a flip, matte or packed alpha is skipped for one, and said.
+    const bool isGroup = obs_source_is_group(videoSource);
+    if (isGroup && (sourceWidth == 0 || sourceHeight == 0)) {
+      obs_source_release(videoSource);
+      obs_source_release(routedScene);
+      error = "its group is empty";
+      return false;
+    }
+    if (isGroup && (bundle.flipX || bundle.flipY || bundle.chromaBackground || bundle.packedAlpha))
+      blog(LOG_WARNING, "[Synqframe] Bundle %s is a group: sent as it is, without its flip, matte or packed alpha "
+                        "(a group can't go in a second scene)", bundle.id.c_str());
     // A source with no size yet (a game capture that hasn't hooked): a canvas of its size would
     // be 1x1, its one pixel stretched over the bundle (2026-10-27: a flat colour for 9 minutes).
     // Instead it goes in a scene of the bundle's own size, fitted within its bounds as it
@@ -235,7 +249,7 @@ bool ProgramPublisher::buildRoute(const PublishRouteConfig &bundle, ChannelOutpu
     }
     // Flipped in OBS (a mirrored camera): the source in a scene of its own, flipped within
     // bounds of its own size so it stays in place, as OBS's own flip does.
-    if (bundle.flipX || bundle.flipY) {
+    if (!isGroup && (bundle.flipX || bundle.flipY)) {
       auto *flipScene = obs_scene_create_private((name + " flip").c_str());
       if (flipScene) {
         if (auto *flipped = obs_scene_add(flipScene, videoSource)) {
@@ -255,7 +269,7 @@ bool ProgramPublisher::buildRoute(const PublishRouteConfig &bundle, ChannelOutpu
         obs_scene_release(flipScene);
       }
     }
-    if (bundle.chromaBackground) {
+    if (!isGroup && bundle.chromaBackground) {
       const auto sceneName = name + " canvas";
       auto *composite = obs_scene_create_private(sceneName.c_str());
       auto *colorSettings = obs_data_create();
@@ -275,7 +289,7 @@ bool ProgramPublisher::buildRoute(const PublishRouteConfig &bundle, ChannelOutpu
       if (composite) obs_scene_release(composite);
     }
     // Packed alpha: the picture over black on top, its alpha as grey below (synqframe/packed-alpha.hpp).
-    const bool packed = bundle.packedAlpha && !bundle.chromaBackground;
+    const bool packed = !isGroup && bundle.packedAlpha && !bundle.chromaBackground;
     if (packed) {
       auto *alphaScene = obs_scene_create_private((name + " alpha").c_str());
       auto *packScene = obs_scene_create_private((name + " packed").c_str());
