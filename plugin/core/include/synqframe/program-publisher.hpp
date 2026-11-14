@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -34,6 +35,10 @@ public:
   explicit ProgramPublisher(ProgramConfig config); ~ProgramPublisher();
   bool start(std::string &error); void stop(); bool active() const; obs_output *output() const;
   void refreshAudioMixes();
+  // Ends every running route whose source `shown` says is in no scene (the creator took it out of
+  // them all): its source let go, so OBS can destroy it and a camera turns off, as when the source
+  // is deleted. The others carry on. UI thread (shown reads the scenes).
+  void endRoutesNotShown(const std::function<bool(obs_source *)> &shown);
   uint64_t totalBytes() const; int droppedFrames() const;
 private:
   struct AudioRoute { obs_source *source=nullptr; uint32_t previousMixers=0; };

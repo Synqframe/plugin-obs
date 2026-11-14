@@ -547,6 +547,23 @@ void ProgramPublisher::endRoute(size_t index, const char *why)
   item.audioMemberUuids.clear();
 }
 
+void ProgramPublisher::endRoutesNotShown(const std::function<bool(obs_source *)> &shown)
+{
+  for (size_t index = 0; index < config_.routes.size(); ++index) {
+    {
+      std::lock_guard lock(mutex_);
+      if (index >= outputs_.size() || outputs_[index].removed) continue;
+    }
+    obs_source_t *source = routeSource(config_.routes[index], OBS_SOURCE_VIDEO);
+    if (!source) continue;
+    const bool inScene = shown(source);
+    obs_source_release(source);
+    if (inScene) continue;
+    std::lock_guard lock(mutex_);
+    endRoute(index, "its source is in no scene");
+  }
+}
+
 void ProgramPublisher::refreshAudioMixes()
 {
   std::lock_guard lock(mutex_);
