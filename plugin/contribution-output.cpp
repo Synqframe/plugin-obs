@@ -26,6 +26,7 @@
 #include <QPointer>
 #include <QSet>
 #include <QStringList>
+#include <QTimer>
 #include <QUrl>
 #include <QRegularExpression>
 
@@ -1046,9 +1047,55 @@ obs_output_info outputInfo = {
 };
 }
 
+// Whether `source` is in a scene of OBS's own list or of the vertical canvas (in a group, or in a
+// scene shown inside another: that scene is in the list too). UI thread.
+static bool inSomeScene(obs_source_t *source)
+{
+  const char *name = obs_source_get_name(source);
+  if (!name) return false;
+  bool found = false;
+  obs_frontend_source_list scenes = {};
+  obs_frontend_get_scenes(&scenes);
+  for (size_t i = 0; i < scenes.sources.num && !found; ++i) {
+    obs_source_t *scene = scenes.sources.array[i];
+    found = scene == source || obs_scene_find_source_recursive(obs_scene_from_source(scene), name);
+  }
+  obs_frontend_source_list_free(&scenes);
+  if (found) return true;
+  if (obs_canvas_t *canvas = getVerticalLayoutCanvas()) {
+    struct Find {
+      obs_source_t *source;
+      const char *name;
+      bool found;
+    } find{source, name, false};
+    obs_canvas_enum_scenes(
+      canvas,
+      [](void *data, obs_source_t *scene) {
+        auto &f = *static_cast<Find *>(data);
+        f.found = scene == f.source || obs_scene_find_source_recursive(obs_scene_from_source(scene), f.name);
+        return !f.found;
+      },
+      &find);
+    obs_canvas_release(canvas);
+    found = find.found;
+  }
+  return found;
+}
+
 void registerContributionOutput()
 {
   obs_register_output(&outputInfo);
+  // A bundle whose source the creator takes out of every scene stops (owner, 2026-11-14): the route
+  // lets the source go, so OBS can destroy it and a camera's light goes off, instead of the stream
+  // holding it until Stop Streaming. Checked each second while publishing.
+  if (qApp) {
+    auto *timer = new QTimer(qApp);
+    QObject::connect(timer, &QTimer::timeout, [] {
+      for (auto *context : activeOutputs)
+        if (context && context->publisher) context->publisher->endRoutesNotShown(inSomeScene);
+    });
+    timer->start(1000);
+  }
 }
 
 void refreshContributionAudioMixes()
