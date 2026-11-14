@@ -39,6 +39,11 @@ public:
   // them all): its source let go, so OBS can destroy it and a camera turns off, as when the source
   // is deleted. The others carry on. UI thread (shown reads the scenes).
   void endRoutesNotShown(const std::function<bool(obs_source *)> &shown);
+  // A route started while streaming (a bundle the creator added): built and started like those at
+  // start, watched the same way. False with `error` (nothing left behind). UI thread.
+  bool addRoute(const PublishRouteConfig &route, std::string &error);
+  // The ids of the routes still sending (not ended).
+  std::vector<std::string> runningRouteIds() const;
   uint64_t totalBytes() const; int droppedFrames() const;
 private:
   struct AudioRoute { obs_source *source=nullptr; uint32_t previousMixers=0; };
@@ -53,7 +58,11 @@ private:
   static void filterEnabled(void *data, calldata *); // the filter's enable: turned off?
   void endRoute(size_t index, const char *why); // with mutex_ held
   void watchSources(); void unwatchSources();
+  bool buildRoute(const PublishRouteConfig &bundle, ChannelOutput &item, std::string &error); // mutex_ held, or not yet shared
+  void releaseItem(ChannelOutput &item); // mutex_ held, or not yet shared
+  void watchRoute(size_t index);
+  uint32_t mixesUsed_ = 0; std::string videoId_;
   void release(); ProgramConfig config_; std::vector<ChannelOutput> outputs_;
-  std::vector<std::unique_ptr<RemoveWatch>> watches_; std::mutex mutex_;
+  std::vector<std::unique_ptr<RemoveWatch>> watches_; mutable std::mutex mutex_;
 };
 }
