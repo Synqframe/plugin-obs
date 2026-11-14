@@ -35,8 +35,8 @@ public:
   explicit ProgramPublisher(ProgramConfig config); ~ProgramPublisher();
   bool start(std::string &error); void stop(); bool active() const; obs_output *output() const;
   void refreshAudioMixes();
-  // Ends every running route whose source `shown` says is in no scene (the creator took it out of
-  // them all): its source let go, so OBS can destroy it and a camera turns off, as when the source
+  // Ends every running route whose source `shown` says isn't shown (in no scene, or an empty group:
+  // the creator took it out, or emptied it): its source let go, so OBS can destroy it and a camera turns off, as when the source
   // is deleted. The others carry on. UI thread (shown reads the scenes).
   void endRoutesNotShown(const std::function<bool(obs_source *)> &shown);
   // A route started while streaming (a bundle the creator added): built and started like those at

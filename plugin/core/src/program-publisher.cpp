@@ -634,7 +634,7 @@ void ProgramPublisher::endRoutesNotShown(const std::function<bool(obs_source *)>
     obs_source_release(source);
     if (inScene) continue;
     std::lock_guard lock(mutex_);
-    endRoute(index, "its source is in no scene");
+    endRoute(index, "its source is in no scene, or shows nothing");
   }
 }
 
