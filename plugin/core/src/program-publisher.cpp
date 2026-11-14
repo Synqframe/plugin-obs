@@ -51,6 +51,20 @@ obs_source_t *routeSource(const PublishRouteConfig &config, uint32_t flag)
 
 void collectSourceAudio(obs_source_t *source, std::vector<obs_source_t *> &sources);
 
+// A source whose mixers a route changed gets them back, if it's still there. The route keeps it
+// weakly: a strong reference held every audio source the bundle ever touched (a camera taken out
+// of the bundle's group, say) alive and capturing until Stop Streaming (owner, 2026-11-14).
+template <typename Route> void restoreMixers(Route &route)
+{
+  if (!route.source) return;
+  if (obs_source_t *source = obs_weak_source_get_source(route.source)) {
+    obs_source_set_audio_mixers(source, route.previousMixers);
+    obs_source_release(source);
+  }
+  obs_weak_source_release(route.source);
+  route.source = nullptr;
+}
+
 void collectSceneAudio(obs_scene_t *scene, std::vector<obs_source_t *> &sources)
 {
   obs_scene_enum_items(
@@ -123,7 +137,7 @@ template <typename Routes> void configureSceneAudioMix(uint32_t mix, const std::
       const bool included = std::find(context.members->begin(), context.members->end(), source) != context.members->end();
       const auto configured = included ? (previous | context.bit) : (previous & ~context.bit);
       if (configured == previous) return true;
-      context.routes->push_back({obs_source_get_ref(source), previous});
+      context.routes->push_back({obs_source_get_weak_source(source), previous});
       obs_source_set_audio_mixers(source, configured);
       return true;
     },
@@ -549,11 +563,7 @@ void ProgramPublisher::endRoute(size_t index, const char *why)
     obs_source_release(item.alphaSource);
     item.alphaSource = nullptr;
   }
-  for (auto route = item.audioRoutes.rbegin(); route != item.audioRoutes.rend(); ++route)
-    if (route->source) {
-      obs_source_set_audio_mixers(route->source, route->previousMixers);
-      obs_source_release(route->source);
-    }
+  for (auto route = item.audioRoutes.rbegin(); route != item.audioRoutes.rend(); ++route) restoreMixers(*route);
   item.audioRoutes.clear();
   item.audioMemberUuids.clear();
 }
@@ -679,12 +689,7 @@ void ProgramPublisher::releaseItem(ChannelOutput &output)
     if (item->output && item->stamper) item->stamper->detach(item->output);
     if (item->output) obs_output_release(item->output);
     if (item->service) obs_service_release(item->service);
-    for (auto route = item->audioRoutes.rbegin(); route != item->audioRoutes.rend(); ++route) {
-      if (route->source) {
-        obs_source_set_audio_mixers(route->source, route->previousMixers);
-        obs_source_release(route->source);
-      }
-    }
+    for (auto route = item->audioRoutes.rbegin(); route != item->audioRoutes.rend(); ++route) restoreMixers(*route);
     if (item->videoEncoder) obs_encoder_release(item->videoEncoder);
     if (item->audioEncoder) obs_encoder_release(item->audioEncoder);
     if (item->view) {
