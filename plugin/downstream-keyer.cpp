@@ -130,7 +130,15 @@ void apply(bool vertical, const std::optional<Shown> &want, int attempt)
 
 bool downstreamKeyerAvailable()
 {
-  return dsk("get_downstream_keyers", {{QStringLiteral("view_name"), QString()}}).has_value();
+  const bool available = dsk("get_downstream_keyers", {{QStringLiteral("view_name"), QString()}}).has_value();
+  // Said when it changes (it's asked at every report): whether the keyer can go through DSK.
+  static int last = -1;
+  if (last != static_cast<int>(available)) {
+    blog(LOG_INFO, "[Synqframe] Downstream Keyer %s", available ? "answers: the keyer goes through it"
+                                                              : "isn't there: the web merges the keyer into each scene");
+    last = available;
+  }
+  return available;
 }
 
 bool isKeyerScene(obs_source *scene)
