@@ -41,6 +41,7 @@ struct LocalBundle {
   int height = 0;
   int fps = 0;
   bool autoBitrate = false; // the filter's "Automatic bitrate": sent at recommendedBundleKbps
+  bool globalMic = false;   // the filter's "Include OBS's Mic/Aux audio": on by default for `creator`
   bool recordStreamCopy = false; // the filter's "Record a stream copy" box (bundle ISOs, stream copy)
 };
 

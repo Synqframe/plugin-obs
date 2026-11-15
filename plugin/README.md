@@ -40,7 +40,9 @@ must build against stock OBS without modifications to OBS Studio or libobs.
    through untouched. The bitrate is automatic by default, worked out from the
    bundle's size and frame rate when it starts (1080p60 at 6000 kbps, scaled by
    pixels^0.75 and frame rate^0.6); a creator can set their own instead. The bundle sends
-   the source's picture and its own audio (a scene's: everything in it), so a
+   the source's picture and its own audio (a scene's: everything in it), plus
+   OBS's global Mic/Aux devices when its "Include OBS's Mic/Aux audio" box is
+   ticked (the `creator` bundle's default, so a creator's mic needs no source), so a
    mic is tied to a camera with OBS's own controls. Removing or disabling the
    filter makes the source plain OBS again. The old `synqframe_bundle` source
    is gone: when a collection loads, any left in it (and their hidden bundle
