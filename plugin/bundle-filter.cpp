@@ -160,6 +160,24 @@ void bundleSize(obs_source_t *parent, obs_data_t *settings, int &width, int &hei
   height = std::max(2, static_cast<int>(sourceHeight * scale) & ~1);
 }
 
+int recommendedKbpsFor(int width, int height, int fps);
+
+int filterFps(obs_data_t *settings)
+{
+  const int fps = static_cast<int>(obs_data_get_int(settings, "fps_num"));
+  return fps > 0 ? fps : 30;
+}
+
+// The video bitrate the filter sends at: worked out from the bundle's size and frame rate while
+// "Automatic bitrate" is on (the default), else the creator's own.
+int filterVideoKbps(obs_source_t *parent, obs_data_t *settings)
+{
+  if (!obs_data_get_bool(settings, "bitrate_auto")) return static_cast<int>(obs_data_get_int(settings, "bitrate_kbps"));
+  int width, height;
+  bundleSize(parent, settings, width, height);
+  return recommendedKbpsFor(width, height, filterFps(settings));
+}
+
 // A filter without an id gets the bundle named after its source: this seat's own if it has
 // one no other filter holds (the server seeds `content` and `creator` per seat, and layouts
 // name those, so a source called "Creator" becomes `creator`, not `creator-2`), otherwise a
@@ -186,7 +204,7 @@ QString mintBundleId(obs_source_t *parent, obs_source_t *filter, const ClientSet
       {"label", label.isEmpty() ? id : label},
       {"video", QJsonObject{{"width", width}, {"height", height},
                              {"fpsNum", static_cast<int>(obs_data_get_int(settings, "fps_num"))}, {"fpsDen", 1},
-                             {"bitrateKbps", static_cast<int>(obs_data_get_int(settings, "bitrate_kbps"))}}},
+                             {"bitrateKbps", filterVideoKbps(parent, settings)}}},
       {"audio", QJsonObject{{"bitrateKbps", DefaultAudioKbps}}},
       {"background", QJsonObject{{"mode", "opaque"}, {"color", "#00ff00"}}},
       {"enabled", true}};
@@ -203,8 +221,9 @@ QString mintBundleId(obs_source_t *parent, obs_source_t *filter, const ClientSet
 }
 
 // UI thread. Writes the filter's settings to its bundle in the session catalog, keeping what
-// the filter doesn't set (label, audio, enabled). A bitrate the creator never set is the
-// bundle's own, so a filter made by the conversion doesn't reset it.
+// the filter doesn't set (label, audio, enabled). An automatic bitrate is saved as what it works
+// out to now (Start Streaming works it out again from the size then); a set bitrate the creator
+// never typed is the bundle's own, so turning automatic off starts from what the bundle had.
 // True when the save failed in a way worth trying again (queueSave retries it).
 bool saveToCatalog(obs_source_t *filter)
 {
@@ -230,7 +249,7 @@ bool saveToCatalog(obs_source_t *filter)
   for (const QJsonValue &value : catalog)
     if (value.toObject().value("id").toString() == id) previous = value.toObject();
   obs_data_t *settings = obs_source_get_settings(filter);
-  if (!obs_data_has_user_value(settings, "bitrate_kbps"))
+  if (!obs_data_get_bool(settings, "bitrate_auto") && !obs_data_has_user_value(settings, "bitrate_kbps"))
     obs_data_set_int(settings, "bitrate_kbps",
                      previous.value("video").toObject().value("bitrateKbps").toInt(DefaultVideoKbps));
   int width, height;
@@ -242,7 +261,7 @@ bool saveToCatalog(obs_source_t *filter)
     {"label", previous.value("label").toString(QString::fromUtf8(obs_source_get_name(parent)))},
     {"video", QJsonObject{{"width", width}, {"height", height},
                            {"fpsNum", static_cast<int>(obs_data_get_int(settings, "fps_num"))}, {"fpsDen", 1},
-                           {"bitrateKbps", static_cast<int>(obs_data_get_int(settings, "bitrate_kbps"))}}},
+                           {"bitrateKbps", filterVideoKbps(parent, settings)}}},
     {"audio", QJsonObject{{"bitrateKbps", previous.value("audio").toObject().value("bitrateKbps").toInt(DefaultAudioKbps)}}},
     {"background",
      QJsonObject{{"mode", chroma ? "chroma" : alpha ? "alpha" : "opaque"},
@@ -323,8 +342,9 @@ const char *name(void *) { return "Synqframe Bundle"; }
 
 // The bitrate this size and frame rate want, to the nearest 500: 1080p60 at 6000, Twitch's own
 // ceiling for it (the old 1080p30 at 6000 asked about 1.5x Twitch), scaled by
-// pixels^0.75 (encoders need less per pixel as size grows) and frame rate^0.6. 1080p30 4000,
-// 720p60 3500, 1440p30 6000, 1440p60 9000.
+// pixels^0.75 (encoders need less per pixel as size grows) and frame rate^0.6 (consecutive frames
+// share more as the rate rises). 1080p30 4000, 720p60 3500, 1440p30 6000, 1440p60 9000; a
+// bits-per-pixel rule (w x h x fps x 0.08) asks 10000 for 1080p60, more than platforms take.
 int recommendedKbpsFor(int width, int height, int fps)
 {
   const double pixels = static_cast<double>(width) * height / (1920.0 * 1080.0);
@@ -332,20 +352,30 @@ int recommendedKbpsFor(int width, int height, int fps)
   return std::max(500, static_cast<int>(std::lround(6000.0 * share / 500.0)) * 500);
 }
 
-// Native size is the default, so a source keeps 6000 kbps unless the creator
-// changes it; at 1440p60 that is thin for the HUD detail the analyzer reads (kill-feed icons,
-// small text). Warn below 75% of what the bundle's size and frame rate want.
+// Automatic: the bitrate the bundle's size and frame rate work out to, shown. Set by hand: warn
+// below 75% of that, thin for the HUD detail the analyzer reads (kill-feed icons, small text).
 bool bitrateChanged(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
 {
   obs_property_t *warning = obs_properties_get(props, "bitrate_warning");
+  obs_property_t *automatic = obs_properties_get(props, "bitrate_auto_info");
   auto *filter = static_cast<obs_source_t *>(obs_properties_get_param(props));
   obs_source_t *parent = filter ? obs_filter_get_parent(filter) : nullptr;
   int width = 0, height = 0;
   bundleSize(parent, settings, width, height);
-  const int fps = static_cast<int>(obs_data_get_int(settings, "fps_num"));
+  const int fps = filterFps(settings);
   const int kbps = static_cast<int>(obs_data_get_int(settings, "bitrate_kbps"));
-  const int wanted = recommendedKbpsFor(width, height, fps > 0 ? fps : 30);
-  const bool low = parent && bundleBitrateLow(width, height, fps > 0 ? fps : 30, kbps);
+  const int wanted = recommendedKbpsFor(width, height, fps);
+  const bool isAuto = obs_data_get_bool(settings, "bitrate_auto");
+  obs_property_set_visible(obs_properties_get(props, "bitrate_kbps"), !isAuto);
+  if (isAuto) {
+    const std::string text = parent ? "About " + std::to_string(wanted) + " kbps at " + std::to_string(width) + "x" +
+                                        std::to_string(height) + " and " + std::to_string(fps) +
+                                        " fps; worked out again from the size when streaming starts."
+                                    : std::string("Worked out from the bundle's size and frame rate when streaming starts.");
+    obs_property_set_description(automatic, text.c_str());
+  }
+  obs_property_set_visible(automatic, isAuto);
+  const bool low = !isAuto && parent && bundleBitrateLow(width, height, fps, kbps);
   if (low) {
     const std::string text = "At " + std::to_string(width) + "x" + std::to_string(height) + " and " + std::to_string(fps) +
                              " fps, " + std::to_string(kbps) + " kbps is low: about " + std::to_string(wanted) +
@@ -425,6 +455,8 @@ obs_properties_t *properties(void *data)
   obs_property_t *fps = obs_properties_add_list(props, "fps_num", "Frame rate", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
   obs_property_list_add_int(fps, "30 FPS", 30);
   obs_property_list_add_int(fps, "60 FPS", 60);
+  obs_property_t *bitrateAuto = obs_properties_add_bool(props, "bitrate_auto", "Automatic bitrate (from size and frame rate)");
+  obs_properties_add_text(props, "bitrate_auto_info", "", OBS_TEXT_INFO);
   obs_property_t *bitrate = obs_properties_add_int(props, "bitrate_kbps", "Video bitrate", 500, 50000, 100);
   obs_property_int_set_suffix(bitrate, " kbps");
   obs_property_t *warning = obs_properties_add_text(props, "bitrate_warning", "", OBS_TEXT_INFO);
@@ -434,6 +466,7 @@ obs_properties_t *properties(void *data)
   obs_property_set_modified_callback(resolution, bitrateChanged);
   obs_property_set_modified_callback(fps, bitrateChanged);
   obs_property_set_modified_callback(bitrate, bitrateChanged);
+  obs_property_set_modified_callback(bitrateAuto, bitrateChanged);
   obs_property_t *background =
     obs_properties_add_list(props, "background_mode", "Background", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
   obs_property_list_add_string(background, "Opaque / source alpha", "opaque");
@@ -456,6 +489,7 @@ void defaults(obs_data_t *settings)
   obs_video_info video{};
   obs_get_video_info(&video);
   obs_data_set_default_int(settings, "fps_num", video.fps_num >= 60 ? 60 : 30);
+  obs_data_set_default_bool(settings, "bitrate_auto", true);
   obs_data_set_default_int(settings, "bitrate_kbps", DefaultVideoKbps);
   obs_data_set_default_string(settings, "background_mode", "opaque");
   obs_data_set_default_int(settings, "background_color", 0xff00ff00);
@@ -563,6 +597,8 @@ std::vector<LocalBundle> collectLocalBundles(QString &duplicate, QString &error,
                          QString::fromUtf8(obs_source_get_uuid(item.filter))};
       bundle.recordStreamCopy = obs_data_get_bool(settings, "record_stream_copy");
       bundleSize(item.parent, settings, bundle.width, bundle.height);
+      bundle.fps = filterFps(settings);
+      bundle.autoBitrate = obs_data_get_bool(settings, "bitrate_auto");
       obs_data_release(settings);
       bundles.push_back(bundle);
     }

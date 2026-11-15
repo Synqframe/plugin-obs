@@ -17,8 +17,10 @@ struct obs_source;
 // source is a plain OBS source again.
 void registerBundleFilter();
 
-// The video bitrate a bundle of this size and frame rate wants (kbps): 1080p30 at 6000, in
-// proportion to pixels and to frame rate^0.6. Below 75% of it the filter warns, in its
+// The video bitrate a bundle of this size and frame rate wants (kbps), to the nearest 500: 1080p60
+// at 6000, scaled by pixels^0.75 and frame rate^0.6 (1080p30 4000, 720p60 3500, 1440p60 9000). A
+// bundle on an automatic bitrate (the filter's default) is sent at it, worked out from its size
+// and frame rate when it starts; on a set bitrate below 75% of it the filter warns, in its
 // properties and at Start Streaming.
 int recommendedBundleKbps(int width, int height, int fps);
 bool bundleBitrateLow(int width, int height, int fps, int kbps);
@@ -37,6 +39,8 @@ struct LocalBundle {
   QString filterUuid; // the Synqframe Bundle filter: removing or disabling it ends the route
   int width = 0;
   int height = 0;
+  int fps = 0;
+  bool autoBitrate = false; // the filter's "Automatic bitrate": sent at recommendedBundleKbps
   bool recordStreamCopy = false; // the filter's "Record a stream copy" box (bundle ISOs, stream copy)
 };
 

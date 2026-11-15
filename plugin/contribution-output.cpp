@@ -784,7 +784,12 @@ std::optional<QString> addBundleRoutes(const ClientSettings &settings, int video
     const int sourceHeight = localBundle.height > 0 ? localBundle.height : target.value(QStringLiteral("height")).toInt(1080);
     const int targetFpsNum = target.value(QStringLiteral("fpsNum")).toInt(30);
     const int targetFpsDen = target.value(QStringLiteral("fpsDen")).toInt(1);
-    const int targetVideoBitrate = target.value(QStringLiteral("bitrateKbps")).toInt(videoBitrate);
+    // An automatic bitrate is worked out from the size the bundle has now (its source may have
+    // changed size since the catalog was saved); a set one is the catalog's.
+    const int targetVideoBitrate =
+      localBundle.autoBitrate && localBundle.width > 0
+        ? recommendedBundleKbps(sourceWidth, sourceHeight, targetFpsNum / std::max(1, targetFpsDen))
+        : target.value(QStringLiteral("bitrateKbps")).toInt(videoBitrate);
     const int targetAudioBitrate = audio.value(QStringLiteral("bitrateKbps")).toInt(audioBitrate);
     // Collaborating, the platform composes these into the personal and session programs, so each
     // goes at its bundle's own target whoever composes the channel program.
@@ -808,7 +813,8 @@ std::optional<QString> addBundleRoutes(const ClientSettings &settings, int video
            flip.x ? " horizontally" : "", flip.y ? (flip.x ? " and vertically" : " vertically") : "");
     // Bundle ISOs, stream copy: the bundle filter's "Record a stream copy" box.
     if (localBundle.recordStreamCopy) config.routes.back().isoPath = localRecordingPath(id).toStdString();
-    if (bundleBitrateLow(sourceWidth, sourceHeight, targetFpsNum / std::max(1, targetFpsDen), targetVideoBitrate))
+    if (!localBundle.autoBitrate &&
+        bundleBitrateLow(sourceWidth, sourceHeight, targetFpsNum / std::max(1, targetFpsDen), targetVideoBitrate))
       lowBitrates << QStringLiteral("%1: %2x%3 at %4 fps on %5 kbps (about %6 kbps recommended)")
                        .arg(id).arg(sourceWidth).arg(sourceHeight).arg(targetFpsNum / std::max(1, targetFpsDen))
                        .arg(targetVideoBitrate)
