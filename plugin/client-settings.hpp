@@ -85,13 +85,8 @@ const char *compositionModeName(CompositionMode mode);
 // program ("self": OBS, "platform": the compositor), and whether the bundles are uploaded.
 const char *composerName(CompositionMode mode);
 bool collaborates(CompositionMode mode);
-// Whether the plugin turned off OBS's global audio devices (remote mode), so it turns them
-// back on when leaving it (global-audio.hpp). Its own key, apart from ClientSettings, so a
+// Whether an older plugin turned off OBS's global audio devices (remote mode), so they are turned
+// back on once (global-audio.hpp). Its own key, apart from ClientSettings, so a
 // stale copy saved elsewhere never overwrites it.
 bool globalAudioScrubbed();
 void setGlobalAudioScrubbed(bool scrubbed);
-// Whether the one-time return of Mic/Aux has been done: plugins before the Creator bundle carried
-// OBS's mic turned it off in remote mode too; it comes back once (global-audio.cpp), and a mic the
-// creator removes after that stays removed.
-bool globalMicReturned();
-void setGlobalMicReturned();

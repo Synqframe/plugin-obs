@@ -12,14 +12,11 @@
 #include <QObject>
 #include <QPointer>
 #include <QStringList>
-#include <QTimer>
 #include <QWidget>
 
 namespace {
 // OBS's global audio devices: Desktop Audio 1-2 on channels 1-2, Mic/Aux 1-4 on 3-6.
-constexpr uint32_t FirstDeviceChannel = 1, LastDeviceChannel = 6;
 constexpr uint32_t DesktopChannel = 1, MicChannel = 3;
-constexpr int RecheckMs = 2000;
 
 #if defined(_WIN32)
 constexpr const char *DesktopSourceId = "wasapi_output_capture", *MicSourceId = "wasapi_input_capture";
@@ -30,31 +27,8 @@ constexpr const char *DesktopSourceId = "pulse_output_capture", *MicSourceId = "
 #endif
 
 QObject *context = nullptr;
-QTimer *recheck = nullptr;
 bool loaded = false;
 QPointer<QMessageBox> notice;
-
-// Removes every Desktop Audio device on and returns their names. Mic/Aux stays: the Creator
-// bundle sends it.
-QStringList removeGlobalDevices()
-{
-  QStringList removed;
-  for (uint32_t channel = FirstDeviceChannel; channel < MicChannel; ++channel) {
-    obs_source_t *source = obs_get_output_source(channel);
-    if (!source) continue;
-    const uint32_t flags = obs_source_get_output_flags(source);
-    // Only an audio device: a plugin may put something else on these channels.
-    if ((flags & OBS_SOURCE_AUDIO) && !(flags & OBS_SOURCE_VIDEO)) {
-      const char *name = obs_source_get_name(source);
-      removed << QString::fromUtf8(name && *name ? name : obs_source_get_id(source));
-      blog(LOG_INFO, "[synqframe] remote mode: turned off global audio device \"%s\" (%s, channel %u)", name ? name : "",
-           obs_source_get_id(source), channel);
-      obs_set_output_source(channel, nullptr);
-    }
-    obs_source_release(source);
-  }
-  return removed;
-}
 
 // Puts a device on the system's default on an empty channel; its name if it did.
 QString restoreDefault(uint32_t channel, const char *id, const char *name)
@@ -71,7 +45,7 @@ QString restoreDefault(uint32_t channel, const char *id, const char *name)
   if (!source) return {};
   obs_set_output_source(channel, source);
   obs_source_release(source);
-  blog(LOG_INFO, "[synqframe] left remote mode: turned global audio device \"%s\" (%s, channel %u) back on, system default",
+  blog(LOG_INFO, "[synqframe] turned global audio device \"%s\" (%s, channel %u) back on, system default (an older plugin turned it off)",
        name, id, channel);
   return QString::fromUtf8(name);
 }
@@ -94,43 +68,9 @@ void showNotice(const QString &title, const QString &text)
 
 void check()
 {
-  if (!loaded) return;
-  if (loadClientSettings().compositionMode == CompositionMode::Remote) {
-    // Once: a mic an older plugin turned off here comes back, as the Creator bundle sends it now.
-    if (!globalMicReturned()) {
-      setGlobalMicReturned();
-      if (globalAudioScrubbed()) {
-        const QString mic = restoreDefault(MicChannel, MicSourceId, "Mic/Aux");
-        if (!mic.isEmpty()) {
-          obs_frontend_save();
-          showNotice(QObject::tr("Mic/Aux turned back on"),
-                     QObject::tr("Synqframe turned OBS's Mic/Aux back on, on your system's default microphone. Your "
-                                 "Creator bundle now sends OBS's Mic/Aux devices, so your mic needs no source of its "
-                                 "own. Choose another device in Settings > Audio, or untick \"Include OBS's Mic/Aux "
-                                 "audio\" in the Creator bundle's filter if your mic is already a source in it."));
-        }
-      }
-    }
-    const QStringList removed = removeGlobalDevices();
-    if (removed.isEmpty()) return;
-    setGlobalAudioScrubbed(true);
-    // Saved now, so the collection keeps them off even if OBS doesn't exit cleanly.
-    obs_frontend_save();
-    showNotice(QObject::tr("Desktop audio turned off"),
-               QObject::tr("Synqframe turned off OBS's desktop audio for remote mode: %1.\n\n"
-                           "In remote mode Synqframe hears your audio only through your bundles. Desktop audio goes "
-                           "straight into your own output instead, skipping the composition and its mix.\n\n"
-                           "Add your game's audio as a source in the Content bundle. Your Mic/Aux devices stay on: the "
-                           "Creator bundle sends them. Desktop audio comes back when you leave remote mode.")
-                 .arg(removed.join(QStringLiteral(", "))));
-    return;
-  }
-  // Local or native: OBS composes the program, so the devices are the user's again. Only the
-  // ones remote mode turned off come back.
-  if (!globalAudioScrubbed()) return;
+  if (!loaded || !globalAudioScrubbed()) return;
   setGlobalAudioScrubbed(false);
   QStringList restored;
-  // Mic/Aux too: an older plugin turned it off in remote mode as well.
   for (const QString &name : {restoreDefault(DesktopChannel, DesktopSourceId, "Desktop Audio"),
                               restoreDefault(MicChannel, MicSourceId, "Mic/Aux")})
     if (!name.isEmpty()) restored << name;
@@ -138,8 +78,9 @@ void check()
   obs_frontend_save();
   showNotice(QObject::tr("Global audio devices turned back on"),
              QObject::tr("Synqframe turned OBS's global audio devices back on, on your system's default devices: %1.\n\n"
-                         "Outside remote mode OBS composes your program itself, so they go into your output as usual. "
-                         "If you used other devices before, choose them again in Settings > Audio.")
+                         "Your bundles send them now, so they need no sources of their own: the Creator bundle your "
+                         "Mic/Aux, the Content bundle your Desktop Audio (the \"Include OBS's ...\" boxes in each "
+                         "bundle's filter). Choose other devices in Settings > Audio.")
                .arg(restored.join(QStringLiteral(", "))));
 }
 } // namespace
@@ -147,22 +88,17 @@ void check()
 void startGlobalAudioGuard(QObject *uiContext)
 {
   context = uiContext;
-  recheck = new QTimer(context);
-  recheck->setInterval(RecheckMs);
-  QObject::connect(recheck, &QTimer::timeout, context, check);
 }
 
 void globalAudioCollectionLoaded()
 {
   loaded = true;
   check();
-  if (recheck) recheck->start();
 }
 
 void globalAudioCollectionChanging()
 {
   loaded = false;
-  if (recheck) recheck->stop();
 }
 
 void globalAudioModeChanged()

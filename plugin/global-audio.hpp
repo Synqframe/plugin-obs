@@ -6,21 +6,15 @@
 class QObject;
 
 // OBS's global audio devices (Settings > Audio: Desktop Audio 1-2 and Mic/Aux 1-4, on output
-// channels 1-6) by composition mode.
+// channels 1-6) are the user's in every mode. In remote mode, where audio reaches the composition
+// only through bundles, the Creator bundle sends Mic/Aux and the Content bundle Desktop Audio
+// (the bundle filter's "Include OBS's ..." boxes, PublishRouteConfig).
 //
-// Remote: Desktop Audio kept off. Audio reaches a remote composition only through bundles; a
-// desktop device goes straight into the user's own output instead, skipping the composition and
-// the web's mix. One found on is removed (the collection then saves it as off) and the user is
-// told, and where it belongs (game audio in the Content bundle). Mic/Aux stays: the Creator
-// bundle carries it (PublishRouteConfig::includeGlobalMic).
+// Older plugins turned the devices off in remote mode instead. Devices they turned off come back
+// once, on the system's default devices, with a notice; devices the user set up are never touched.
 //
-// Local and native: OBS composes the program itself, so the devices are the user's as usual.
-// If the plugin turned them off in remote mode, Desktop Audio and Mic/Aux come back on the
-// system's default devices, with a notice; devices the user set up are never touched.
-//
-// Checked when a collection finishes loading, when the mode changes, and on a timer (a
-// device turned back on in Settings). Only while a collection is fully loaded, like the
-// source sweep. All calls on the UI thread.
+// Checked when a collection finishes loading and when the mode changes, only while a collection
+// is fully loaded. All calls on the UI thread.
 void startGlobalAudioGuard(QObject *uiContext);
 void globalAudioCollectionLoaded();
 void globalAudioCollectionChanging();
