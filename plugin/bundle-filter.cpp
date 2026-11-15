@@ -477,10 +477,12 @@ obs_properties_t *properties(void *data)
   obs_properties_add_color_alpha(props, "background_color", "Matte color");
   obs_properties_add_bool(props, "record_stream_copy", "Record a stream copy (ISO) while streaming");
   obs_properties_add_bool(props, "global_mic", "Include OBS's Mic/Aux audio (Settings > Audio)");
+  obs_properties_add_bool(props, "global_desktop", "Include OBS's Desktop Audio (Settings > Audio)");
   obs_properties_add_text(props, "audio_note",
-                          "Sends this source's picture and its own audio, and OBS's Mic/Aux devices when ticked (the "
-                          "creator bundle's default). Otherwise a source without audio sends silence: put the filter on "
-                          "a scene holding the source and its mic, or set the device's custom audio device.",
+                          "Sends this source's picture and its own audio, with OBS's Mic/Aux devices (the creator "
+                          "bundle's default) and Desktop Audio (the content bundle's) when ticked. Otherwise a source "
+                          "without audio sends silence: put the filter on a scene holding the source and its audio, or "
+                          "set the device's custom audio device.",
                           OBS_TEXT_INFO);
   return props;
 }
@@ -601,11 +603,14 @@ std::vector<LocalBundle> collectLocalBundles(QString &duplicate, QString &error,
       bundleSize(item.parent, settings, bundle.width, bundle.height);
       bundle.fps = filterFps(settings);
       bundle.autoBitrate = obs_data_get_bool(settings, "bitrate_auto");
-      // The creator bundle carries OBS's own mic unless the creator unticked it; set in place the
-      // first time, so the box shows it.
+      // The creator bundle carries OBS's own mic, and the content bundle its desktop audio, unless
+      // the creator unticked it; set in place the first time, so the box shows it.
       if (!obs_data_has_user_value(settings, "global_mic"))
         obs_data_set_bool(settings, "global_mic", id == QStringLiteral("creator"));
+      if (!obs_data_has_user_value(settings, "global_desktop"))
+        obs_data_set_bool(settings, "global_desktop", id == QStringLiteral("content"));
       bundle.globalMic = obs_data_get_bool(settings, "global_mic");
+      bundle.desktopAudio = obs_data_get_bool(settings, "global_desktop");
       obs_data_release(settings);
       bundles.push_back(bundle);
     }

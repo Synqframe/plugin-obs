@@ -108,14 +108,14 @@ std::string captureDevice(obs_source_t *source)
   return device;
 }
 
-// OBS's global Mic/Aux devices (output channels 3-6) joined to `sources`: each one on (an audio
-// device, not something else a plugin put there) that isn't the same source type and device as
-// one already there, which would send the mic twice. "default" counts as any device of its type:
-// the system's default mic is most likely the one a source in the bundle names.
-void addGlobalMics(std::vector<obs_source_t *> &sources)
+// OBS's global audio devices on output channels first..last (Desktop Audio 1-2, Mic/Aux 3-6)
+// joined to `sources`: each one on (an audio device, not something else a plugin put there) that
+// isn't the same source type and device as one already there, which would send it twice.
+// "default" counts as any device of its type: the system's default is most likely the one a
+// source in the bundle names.
+void addGlobalDevices(std::vector<obs_source_t *> &sources, uint32_t first, uint32_t last)
 {
-  constexpr uint32_t FirstMic = 3, LastMic = 6;
-  for (uint32_t channel = FirstMic; channel <= LastMic; ++channel) {
+  for (uint32_t channel = first; channel <= last; ++channel) {
     obs_source_t *mic = obs_get_output_source(channel);
     if (!mic) continue;
     const uint32_t flags = obs_source_get_output_flags(mic);
@@ -143,7 +143,8 @@ std::vector<obs_source_t *> collectRouteAudio(const PublishRouteConfig &route)
   if (auto *scene = obs_scene_from_source(root)) collectSceneAudio(scene, sources);
   else if (obs_source_get_output_flags(root) & OBS_SOURCE_AUDIO) sources.push_back(obs_source_get_ref(root));
   obs_source_release(root);
-  if (route.includeGlobalMic) addGlobalMics(sources);
+  if (route.includeDesktopAudio) addGlobalDevices(sources, 1, 2);
+  if (route.includeGlobalMic) addGlobalDevices(sources, 3, 6);
   return sources;
 }
 

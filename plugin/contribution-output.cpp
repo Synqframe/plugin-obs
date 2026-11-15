@@ -799,9 +799,12 @@ std::optional<QString> addBundleRoutes(const ClientSettings &settings, int video
       obsColor(background.value(QStringLiteral("color")).toString(QStringLiteral("#00ff00")))});
     config.routes.back().endpointTemplate = settings.bundleIngestUrl.toStdString();
     config.routes.back().filterUuid = localBundle.filterUuid.toStdString();
-    // OBS's Mic/Aux devices: the filter's box, or the creator bundle by default without a filter.
+    // OBS's Mic/Aux and Desktop Audio: the filter's boxes, or by default the creator bundle's and
+    // the content bundle's without a filter.
     config.routes.back().includeGlobalMic =
       localBundle.filterUuid.isEmpty() ? id == QStringLiteral("creator") : localBundle.globalMic;
+    config.routes.back().includeDesktopAudio =
+      localBundle.filterUuid.isEmpty() ? id == QStringLiteral("content") : localBundle.desktopAudio;
     // A bundle is re-encoded downstream (the worker, the ladder), so it goes on the encoder's
     // fast preset in every mode: on AMF's default "quality", two 1080p60 bundles beside a game
     // skipped 60% of their frames for encoding lag and put the stream's audio out of step
