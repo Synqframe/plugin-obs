@@ -12,6 +12,7 @@
 #include "bundle-filter.hpp"
 #include "page-sources.hpp"
 #include "text-sources.hpp"
+#include "media-sources.hpp"
 #include "global-audio.hpp"
 #include "aitum-vertical.hpp"
 #include "layout-stacking.hpp"
@@ -616,14 +617,16 @@ void applyProgramScenes(const QJsonObject &state)
   }
 }
 
-// What a layout slot names an item by: its bundle's id, its page's (a widget's or overlay's), or
-// its text's (textIdFor).
+// What a layout slot names an item by: its bundle's id, its page's, its text's (textIdFor) or its
+// media's (mediaIdFor).
 QString slotSourceIdOf(obs_source_t *source)
 {
   const QString bundle = bundleIdOf(source);
   if (!bundle.isEmpty()) return bundle;
   const QString page = pageIdOf(source);
-  return page.isEmpty() ? textIdOf(source) : page;
+  if (!page.isEmpty()) return page;
+  const QString text = textIdOf(source);
+  return text.isEmpty() ? mediaIdOf(source) : text;
 }
 
 bool captureLayoutItem(obs_scene_t *, obs_sceneitem_t *placed, void *opaque)
@@ -638,8 +641,9 @@ bool captureLayoutItem(obs_scene_t *, obs_sceneitem_t *placed, void *opaque)
   // A slot's item shows the source its bundle filter is on, or its page's browser source.
   const QString id = slotSourceIdOf(source);
   if (id.isEmpty()) return true;
-  // Text isn't said back yet: the server keeps a text slot OBS doesn't send (b4dcb33).
-  if (!textIdOf(source).isEmpty()) return true;
+  // Text and media aren't said back yet (the OBS -> web half of parity, msg 1509): the server keeps
+  // a text slot OBS doesn't send (b4dcb33).
+  if (!textIdOf(source).isEmpty() || !mediaIdOf(source).isEmpty()) return true;
   obs_source_t *placedSource = obs_sceneitem_get_source(placed);
   vec2 position{}, bounds{}, scale{};
   obs_sceneitem_get_pos(placed, &position);
@@ -888,6 +892,14 @@ void applyLayoutScene(obs_scene_t *scene, const QJsonObject &document, const QSt
       context.slotIndexByBundle.insert(textId, slotIndex);
       continue;
     }
+    // A media slot's item: its asset's source (media-sources.hpp), one per asset.
+    if (slot.value("sourceKind").toString() == QStringLiteral("media")) {
+      if (slot.value("media").toObject().isEmpty() || slot.value("assetId").toString().isEmpty()) continue;
+      const QString mediaId = mediaIdFor(slot.value("assetId").toString());
+      context.itemsByBundle.insert(mediaId, slot);
+      context.slotIndexByBundle.insert(mediaId, slotIndex);
+      continue;
+    }
     const QString sourceId = slot.value("sourceId").toString(
       slot.value("channel").toString().remove(QRegularExpression("_(video|audio)$")));
     if (!sourceId.isEmpty()) {
@@ -952,6 +964,7 @@ void applyLayoutScene(obs_scene_t *scene, const QJsonObject &document, const QSt
       }
       if (!source) source = pageSourceFor(it.key());
       if (!source) source = textSourceFor(it.key());
+      if (!source) source = mediaSourceFor(it.key());
       if (source) {
         obs_scene_add(scene, source);
         if (bundle) rememberBundle(it.key());
@@ -1006,6 +1019,7 @@ void applyCentralLayout(const QJsonObject &document)
   // Pages first, so the scenes below can place them (layout.schema.json synqframe_page).
   syncPageSources(document);
   syncTextSources(document);
+  syncMediaSources(document);
   const QString viewerId = document.value("contributorId").toString();
   QHash<QString, QJsonObject> scenes;
   for (const QJsonValue &value : document.value("scenes").toArray()) {
@@ -1554,6 +1568,7 @@ void frontendEvent(enum obs_frontend_event event, void *)
     globalAudioCollectionChanging();
     releasePageSources(); // the collection's sources go; a new one gets its pages from the next layout
     releaseTextSources(); // and its text
+    releaseMediaSources(); // and its media
   }
   if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPED && serviceRefreshDeferred) {
     serviceRefreshDeferred = false;

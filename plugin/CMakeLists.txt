@@ -34,6 +34,7 @@ target_sources(
     plugin-signals.cpp
     page-sources.cpp
     text-sources.cpp
+    media-sources.cpp
     slot-groups.cpp
     bundle-filter.hpp
     aitum-vertical.cpp
