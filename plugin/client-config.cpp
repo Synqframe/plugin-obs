@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Synqframe
 
+#include "downstream-keyer.hpp"
 #include "client-config.hpp"
 #include "bundle-filter.hpp"
 
@@ -162,6 +163,7 @@ struct ObsFacts {
   bool serviceIsSynqframe = false;
   bool verticalCanvas = false;
   bool browserPanel = false;
+  bool downstreamKeyer = false;
   std::optional<int> maxUploadKbps; // none: no limit
 };
 
@@ -177,6 +179,7 @@ ObsFacts gatherFacts()
     obs_source_release(vertical);
   }
   facts.browserPanel = obs_browser_qcef_version() >= RequiredPanelVersion;
+  facts.downstreamKeyer = downstreamKeyerAvailable();
   facts.maxUploadKbps = profileMaximumUpload();
   return facts;
 }
@@ -210,6 +213,9 @@ QJsonObject buildState(const ObsFacts &facts, const ClientSettings &settings)
                                           : QJsonArray{QStringLiteral("stream-copy")}},
     {QStringLiteral("programAudioCodecs"), QJsonArray{QStringLiteral("aac"), QStringLiteral("opus")}},
     {QStringLiteral("browserPanel"), facts.browserPanel},
+    // Exeldro's Downstream Keyer answers: the layout then names the keyer scenes instead of
+    // merging the keyer into each scene (downstream-keyer.hpp).
+    {QStringLiteral("downstreamKeyer"), facts.downstreamKeyer},
     {QStringLiteral("remoteStop"), true},
     {QStringLiteral("maxUpload"), true}};
   // What OBS is using right now, so the dock can show the truth before it has

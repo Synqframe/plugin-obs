@@ -7,6 +7,7 @@
 
 #include <QHash>
 #include <QJsonArray>
+#include <QRegularExpression>
 #include <QUrl>
 
 namespace {
@@ -59,9 +60,27 @@ obs_source *pageSourceFor(const QString &id)
   return search.found;
 }
 
+// A page URL the server would have sent (layout.schema.json synqframe_page, msgs 1484/1501): https,
+// at most 2048 characters, no user info, and a DNS host that is not an IP literal, localhost, .local
+// or .internal. Checked again here: the plugin never opens anything else, whatever arrives.
+bool pageUrlAllowed(const QString &text)
+{
+  if (text.size() > 2048) return false;
+  const QUrl url(text);
+  const QString host = url.host().toLower();
+  if (!url.isValid() || url.scheme().toLower() != QStringLiteral("https") || host.isEmpty() || !url.userInfo().isEmpty())
+    return false;
+  if (host == QStringLiteral("localhost") || host.endsWith(QStringLiteral(".localhost")) ||
+      host.endsWith(QStringLiteral(".local")) || host.endsWith(QStringLiteral(".internal")))
+    return false;
+  // An IP literal: IPv6 (QUrl keeps it without brackets) or a dotted IPv4.
+  if (host.contains(QLatin1Char(':'))) return false;
+  static const QRegularExpression ipv4(QStringLiteral("^[0-9.]+$"));
+  return !ipv4.match(host).hasMatch() && host.contains(QLatin1Char('.'));
+}
+
 void syncPageSources(const QJsonObject &document)
 {
-  const QString allowed = originOf(document.value(QStringLiteral("pageOrigin")).toString());
   for (const QJsonValue &value : document.value(QStringLiteral("sources")).toArray()) {
     const QJsonObject entry = value.toObject();
     if (entry.value(QStringLiteral("type")).toString() != QStringLiteral("synqframe_page")) continue;
@@ -71,11 +90,10 @@ void syncPageSources(const QJsonObject &document)
     const int width = page.value(QStringLiteral("width")).toInt();
     const int height = page.value(QStringLiteral("height")).toInt();
     const QString origin = originOf(url);
-    if (id.isEmpty() || allowed.isEmpty() || origin != allowed || width <= 0 || height <= 0 || width > 4096 || height > 4096) {
-      blog(LOG_WARNING, "[Synqframe] Page '%s' left out: %s", id.toUtf8().constData(),
-           allowed.isEmpty() ? "the layout has no pageOrigin"
-           : origin != allowed ? "its URL isn't on the layout's pageOrigin"
-                               : "its size is out of range");
+    if (id.isEmpty() || !pageUrlAllowed(url) || width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+      // Its origin only: a page URL often carries the streamer's token.
+      blog(LOG_WARNING, "[Synqframe] Page '%s' (%s) left out: %s", id.toUtf8().constData(), origin.toUtf8().constData(),
+           !pageUrlAllowed(url) ? "not an https page on a public host" : "its size is out of range");
       continue;
     }
     obs_data_t *settings = obs_data_create();
@@ -86,10 +104,10 @@ void syncPageSources(const QJsonObject &document)
     const int fps = page.value(QStringLiteral("fps")).toInt();
     obs_data_set_bool(settings, "fps_custom", fps > 0);
     if (fps > 0) obs_data_set_int(settings, "fps", fps);
-    // A page with sound plays into OBS's mix, as the web sets page.audio.
-    obs_data_set_bool(settings, "reroute_audio", page.value(QStringLiteral("audio")).toBool(false));
+    // A page with sound plays into OBS's mix; audio absent means true (a third-party alert box
+    // makes sound).
+    obs_data_set_bool(settings, "reroute_audio", page.value(QStringLiteral("audio")).toBool(true));
     obs_data_set_int(settings, "webpage_control_level", 0); // the page can't touch OBS
-    obs_data_set_string(settings, "synqframe_origin", allowed.toUtf8().constData()); // the worker's obs-browser lock
     if (obs_source_t *existing = pageSourceFor(id)) {
       // A replaced token is a new URL for the same page: the same source, updated in place.
       obs_source_update(existing, settings);
