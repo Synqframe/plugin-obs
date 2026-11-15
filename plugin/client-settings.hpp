@@ -77,6 +77,9 @@ struct ClientSettings {
 // thread may call. Tokens are stored protected for this Windows account (DPAPI).
 ClientSettings loadClientSettings();
 void saveClientSettings(const ClientSettings &settings);
+// Swaps the sign-in's access token for a new one soon (module.cpp), after the service refused it
+// (HTTP 401 or close code 4401); at most every 30 s. Either thread may call.
+void requestCredentialRefresh();
 const char *compositionModeName(CompositionMode mode);
 // Contract 2's names for a mode (obs-client-config.schema.json): who composes the channel
 // program ("self": OBS, "platform": the compositor), and whether the bundles are uploaded.

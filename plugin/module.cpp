@@ -18,12 +18,14 @@
 #include "scene-sync.hpp"
 #include "slot-groups.hpp"
 #include "plugin-signals.hpp"
+#include "credential-refresh.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 #include <graphics/vec2.h>
 
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -68,6 +70,11 @@ QString codeVerifier;
 QString callbackUri;
 std::function<void(bool)> connectFinished;
 bool sessionRefreshInFlight = false;
+// When the access token is next swapped for a new one (credential-refresh.hpp), checked against
+// the wall clock every 30 s; invalid while signed out. Before this OBS refreshed only at startup,
+// so an hour into a session every connection was refused (4401) until OBS restarted.
+QDateTime credentialsRefreshDue;
+QTimer *credentialRefreshTimer = nullptr;
 bool layoutRefreshInFlight = false;
 QByteArray appliedLayoutHash;
 QTimer *layoutRefreshTimer = nullptr;
@@ -1059,6 +1066,7 @@ void refreshCentralLayout()
   asyncHttp(pluginContext, synqframeCall(settings, "GET", "/api/me/layout?scope=resolved"),
             [](const HttpReply &reply) {
               layoutRefreshInFlight = false;
+              if (reply.status == 401) requestCredentialRefresh();
               if (!reply.ok()) return;
               const QByteArray hash = QCryptographicHash::hash(reply.body, QCryptographicHash::Sha256);
               if (hash != appliedLayoutHash) {
@@ -1211,6 +1219,13 @@ void ensureLayoutSocket()
   config.onMessage = [](const std::string &message) {
     deliverLayoutSocketPayload(QByteArray::fromStdString(message));
   };
+  // A refused token (4401) is not retried: the login is refreshed, and the new token's key opens a
+  // new connection. Retried, it was refused every 32 s until OBS restarted.
+  config.isFinalClose = [](int code) { return code == 4401; };
+  config.onFinalClose = [](int) {
+    blog(LOG_INFO, "[Synqframe] Layout WebSocket: the token was refused; refreshing the login");
+    requestCredentialRefresh();
+  };
   layoutSocket = std::make_unique<WsClient>(std::move(config));
   layoutSocket->start();
 }
@@ -1229,6 +1244,7 @@ void finishSignIn(const HttpReply &reply)
       settings.accessToken = token;
       settings.refreshToken = body.value(QStringLiteral("refreshToken")).toString();
       saveClientSettings(settings);
+      credentialsRefreshDue = credentialRefreshDue(token, body, QDateTime::currentDateTimeUtc());
       connected = true;
     } else {
       blog(LOG_WARNING, "[Synqframe] Sign-in returned no access token");
@@ -1347,6 +1363,7 @@ void signOut()
   settings.accessToken.clear();
   settings.refreshToken.clear();
   saveClientSettings(settings);
+  credentialsRefreshDue = {};
 }
 
 QString requestError(const HttpReply &reply, const QJsonObject &body, const QString &fallback)
@@ -1366,6 +1383,7 @@ void signOutExpired()
   settings.refreshToken.clear();
   saveClientSettings(settings);
   sessionRefreshInFlight = false;
+  credentialsRefreshDue = {};
   blog(LOG_WARNING, "[Synqframe] Your Synqframe login expired. Sign in again from the Go Live dock.");
 }
 
@@ -1421,17 +1439,22 @@ void refreshSavedSession()
       const QString refreshToken = body.value(QStringLiteral("refreshToken")).toString();
       if (accessToken.isEmpty() || refreshToken.isEmpty()) {
         sessionRefreshInFlight = false;
+        credentialsRefreshDue = QDateTime::currentDateTimeUtc().addSecs(60);
         blog(LOG_WARNING, "[Synqframe] The service returned incomplete refreshed credentials");
       } else {
         settings.accessToken = accessToken;
         settings.refreshToken = refreshToken;
         saveClientSettings(settings);
+        credentialsRefreshDue = credentialRefreshDue(accessToken, body, QDateTime::currentDateTimeUtc());
+        // The sockets see the new token on their next check (a new token is a new connection).
         loadCurrentShow(settings);
       }
     } else if (status == 401) {
       signOutExpired();
     } else {
+      // Offline or the service failing: the old token may still work, and the next check tries again.
       sessionRefreshInFlight = false;
+      credentialsRefreshDue = QDateTime::currentDateTimeUtc().addSecs(60);
       blog(LOG_WARNING, "[Synqframe] Could not refresh the login: %s",
            requestError(reply, body, QStringLiteral("HTTP %1").arg(status)).toUtf8().constData());
     }
@@ -1558,6 +1581,13 @@ void createPluginContext()
     pollEvery = std::min(pollEvery * 2, 30);
   });
   layoutRefreshTimer->start();
+  credentialRefreshTimer = new QTimer(pluginContext);
+  credentialRefreshTimer->setInterval(30 * 1000);
+  QObject::connect(credentialRefreshTimer, &QTimer::timeout, pluginContext, [] {
+    if (credentialsRefreshDue.isValid() && QDateTime::currentDateTimeUtc() >= credentialsRefreshDue)
+      refreshSavedSession();
+  });
+  credentialRefreshTimer->start();
   QTimer::singleShot(0, pluginContext, ensureLayoutSocket);
   programSendTimer = new QTimer(pluginContext);
   programSendTimer->setSingleShot(true);
@@ -1630,6 +1660,19 @@ void createPluginContext()
   });
   audioRouteRefreshTimer->start();
 }
+}
+
+void requestCredentialRefresh()
+{
+  if (!pluginContext) return;
+  QMetaObject::invokeMethod(pluginContext, [] {
+    // At most every 30 s: a token refused again right after a refresh must not spin.
+    static QDateTime lastRequest;
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    if (lastRequest.isValid() && lastRequest.secsTo(now) < 30) return;
+    lastRequest = now;
+    refreshSavedSession();
+  }, Qt::QueuedConnection);
 }
 
 bool connectObs(const std::function<void(const QUrl &)> &open, std::function<void(bool)> finished)

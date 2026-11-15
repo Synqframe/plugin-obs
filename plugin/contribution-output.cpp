@@ -137,6 +137,7 @@ bool signalLiveStopped(const ClientSettings &settings, const char *reason, int t
     blog(LOG_WARNING, "[Synqframe] Could not tell the service that streaming stopped (%s).", reason);
     return false;
   }
+  if (reply.status == 401) requestCredentialRefresh();
   if (!reply.ok())
     blog(LOG_WARNING, "[Synqframe] The service did not record '%s' as the stop reason (HTTP %d).", reason, reply.status);
   else
@@ -171,7 +172,9 @@ bool authorizeContribution(ClientSettings &settings, QString &error, bool persis
     const QJsonValue detail = reply.body.value(QStringLiteral("detail"));
     const QString serverDetail = detail.isString() ? detail.toString().trimmed() : QString();
     if (reply.status == 401) {
-      error = QStringLiteral("Your Synqframe login expired. Reopen OBS to refresh it, or sign in again.");
+      // Refreshed in the background; the next Start Streaming has the new token.
+      requestCredentialRefresh();
+      error = QStringLiteral("Your Synqframe login had expired and is being refreshed. Press Start Streaming again in a moment.");
     } else if (reply.status == 403) {
       error = serverDetail.isEmpty()
         ? QStringLiteral("Synqframe refused this contribution to your current show.")

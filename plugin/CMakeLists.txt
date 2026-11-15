@@ -77,6 +77,12 @@ add_executable(layout-stacking-test tests/layout-stacking-test.cpp)
 target_include_directories(layout-stacking-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(layout-stacking-test PRIVATE cxx_std_20)
 
+# When a sign-in's access token is swapped for a new one (credential-refresh.hpp); Qt only, no OBS.
+add_executable(credential-refresh-test tests/credential-refresh-test.cpp)
+target_include_directories(credential-refresh-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(credential-refresh-test PRIVATE Qt::Core)
+target_compile_features(credential-refresh-test PRIVATE cxx_std_20)
+
 add_executable(golive-test tests/golive-test.cpp golive.cpp)
 target_include_directories(golive-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(golive-test PRIVATE Qt::Core)
