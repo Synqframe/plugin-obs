@@ -9,11 +9,12 @@
 struct obs_source;
 
 // Synqframe pages in OBS (layout.schema.json synqframe_page): each page source the
-// layout lists is an OBS browser source of its own, tagged with the page's id (the widget's or
-// overlay's), shared by every scene that shows it. Its URL carries a token: logged by origin only.
+// layout lists is an OBS browser source of its own, tagged with the page's id (the page slot's),
+// shared by every scene that shows it. A page is whatever the streamer pasted (an alert box, a chat
+// box), any https origin; its URL carries their token: logged by origin only.
 
 // Creates or updates the browser source of every synqframe_page in `document.sources` whose url
-// is on `document.pageOrigin`. UI thread.
+// passes the server's checks (https, a public DNS host, no user info). UI thread.
 void syncPageSources(const QJsonObject &document);
 
 // The page id a source was made for; empty when it isn't a Synqframe page.

@@ -8,6 +8,11 @@ must build against stock OBS without modifications to OBS Studio or libobs.
 - OBS owns scenes, sources, profiles, encoders, the main canvas, and the normal
   streaming controls.
 - Aitum Vertical (a separate plugin) owns the vertical canvas and its editor.
+- Exeldro's Downstream Keyer (a separate plugin, optional) draws the pack's keyer above the
+  program output. The plugin reports it (`capabilities.downstreamKeyer`), makes a "Synqframe
+  Keyer" scene per canvas from the layout's `keyerScenes`, and shows it on a DSK keyer named
+  "Synqframe" through DSK's obs-websocket vendor requests, called in process. The creator's own
+  keyers are never touched. Without DSK the server merges the keyer into every scene instead.
 - The plugin owns the Synqframe Bundle filter (what a source sends), layout synchronization and
   contribution outputs. It has no dock of its own: sign-in, session selection, the
   composition choices and Go Live live in the web dock (`<serviceUrl>/dock`), and

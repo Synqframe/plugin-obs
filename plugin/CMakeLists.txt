@@ -38,6 +38,9 @@ target_sources(
     bundle-filter.hpp
     aitum-vertical.cpp
     aitum-vertical.hpp
+    # The keyer through Exeldro's Downstream Keyer (its obs-websocket vendor requests).
+    downstream-keyer.cpp
+    downstream-keyer.hpp
     layout-stacking.hpp
     # Twitch's BPM SEI for the program ladder, injected into each ladder track's keyframes.
     bpm-output.cpp
@@ -45,7 +48,8 @@ target_sources(
     scene-sync.hpp
 )
 
-target_include_directories(synqframe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_SOURCE_DIR}")
+target_include_directories(synqframe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_SOURCE_DIR}"
+                                             "${CMAKE_SOURCE_DIR}/vendor/obs-websocket")
 target_compile_features(synqframe PRIVATE cxx_std_20)
 target_compile_definitions(synqframe PRIVATE _CRT_SECURE_NO_WARNINGS)
 # HTTPS on libcurl, as OBS does its own (network-request.hpp), and the layout and config sockets.

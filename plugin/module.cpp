@@ -19,6 +19,7 @@
 #include "slot-groups.hpp"
 #include "plugin-signals.hpp"
 #include "credential-refresh.hpp"
+#include "downstream-keyer.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -188,6 +189,9 @@ struct WebScene {
   QString id, name, horizontal, vertical;
 };
 QList<WebScene> webScenes;
+// The layout's keyer scene keys (layout keyerScenes, sent while DSK answers): each one's scene is
+// the canvas's "Synqframe Keyer" (downstream-keyer.hpp), filled and committed like a web scene's.
+QString keyerKeyHorizontal, keyerKeyVertical;
 constexpr const char *SceneMark = "synqframe_scene_id";
 // Set on a scene the plugin made for the web; absent on one adopted from the creator. Only a
 // made scene is ever removed when the web drops it (scene-sync.hpp).
@@ -405,6 +409,8 @@ obs_source_t *sceneForId(const QString &id, bool vertical)
 // The OBS scene that shows layout key `key` (a web scene's horizontal or vertical one).
 obs_source_t *sceneForKey(const QString &key)
 {
+  if (!key.isEmpty() && key == keyerKeyHorizontal) return keyerScene(false, true);
+  if (!key.isEmpty() && key == keyerKeyVertical) return keyerScene(true, true);
   for (const WebScene &scene : webScenes) {
     if (scene.horizontal == key) return sceneForId(scene.id, false);
     if (scene.vertical == key) return sceneForId(scene.id, true);
@@ -705,6 +711,14 @@ QHash<QString, QJsonObject> captureObsLayouts()
           obs_source_release(scene);
         }
       }
+    // The keyer scenes too: an OBS edit to one commits to keyer_h / keyer_v (msg 1503).
+    for (const auto &[key, vertical] : {std::pair{keyerKeyHorizontal, false}, std::pair{keyerKeyVertical, true}}) {
+      if (key.isEmpty()) continue;
+      if (obs_source_t *scene = keyerScene(vertical, false)) {
+        layouts.insert(key, captureLayoutScene(obs_scene_from_source(scene), key));
+        obs_source_release(scene);
+      }
+    }
     return layouts;
   }
   obs_source_t *horizontal = obs_frontend_get_current_scene();
@@ -999,6 +1013,9 @@ void applyCentralLayout(const QJsonObject &document)
     scenes.insert(scene.value("key").toString(), scene);
   }
   webScenes.clear();
+  const QJsonObject keyerScenes = document.value(QStringLiteral("keyerScenes")).toObject();
+  keyerKeyHorizontal = keyerScenes.value(QStringLiteral("horizontal")).toString();
+  keyerKeyVertical = keyerScenes.value(QStringLiteral("vertical")).toString();
   // layoutScenes present but empty: this layout has no scenes of its own (Just Chatting after a
   // game's pack), so the scenes we made for another are put away like any the web drops. Absent (a
   // server from before scenes): the scenes are left as they are.
@@ -1050,6 +1067,21 @@ void applyCentralLayout(const QJsonObject &document)
       applyLayoutScene(obs_scene_from_source(verticalSource), scenes.value("vertical"), viewerId);
       obs_source_release(verticalSource);
     }
+  }
+  // The keyer scenes on DSK, hidden on the keyerExclude scenes of their canvas.
+  {
+    QStringList excludeHorizontal, excludeVertical;
+    for (const QJsonValue &value : document.value(QStringLiteral("keyerExclude")).toArray())
+      for (const WebScene &web : webScenes) {
+        const QString key = value.toString();
+        if (key.isEmpty() || (key != web.horizontal && key != web.vertical)) continue;
+        const bool vertical = key == web.vertical;
+        if (obs_source_t *scene = sceneForId(web.id, vertical)) {
+          (vertical ? excludeVertical : excludeHorizontal) << QString::fromUtf8(obs_source_get_name(scene));
+          obs_source_release(scene);
+        }
+      }
+    applyDownstreamKeyer(!keyerKeyHorizontal.isEmpty(), !keyerKeyVertical.isEmpty(), excludeHorizontal, excludeVertical);
   }
   // Visibility and mute changes alter only mixer membership; update it in
   // place so director operations do not restart encoders or viewer sessions.
