@@ -140,7 +140,9 @@ std::vector<obs_source_t *> collectRouteAudio(const PublishRouteConfig &route)
   std::vector<obs_source_t *> sources;
   auto *root = routeSource(route, OBS_SOURCE_VIDEO);
   if (!root) return sources;
-  if (auto *scene = obs_scene_from_source(root)) collectSceneAudio(scene, sources);
+  // A group too: obs_scene_from_source takes only a scene, and a group carries no audio flag of its
+  // own, so a bundle on a group (the Content and Creator groups) sent silence (owner, 2026-11-15).
+  if (auto *scene = obs_group_or_scene_from_source(root)) collectSceneAudio(scene, sources);
   else if (obs_source_get_output_flags(root) & OBS_SOURCE_AUDIO) sources.push_back(obs_source_get_ref(root));
   obs_source_release(root);
   if (route.includeDesktopAudio) addGlobalDevices(sources, 1, 2);
@@ -412,6 +414,12 @@ bool ProgramPublisher::buildRoute(const PublishRouteConfig &bundle, ChannelOutpu
   item.mix = (uint32_t)mix;
   configureSceneAudioMix((uint32_t)mix, audioSources, item.audioRoutes);
   item.audioMemberUuids = audioMemberUuids(audioSources);
+  {
+    std::string names;
+    for (auto *source : audioSources) names += (names.empty() ? "" : ", ") + std::string(obs_source_get_name(source));
+    blog(LOG_INFO, "[Synqframe] Bundle %s audio (track %zu): %s", bundle.id.c_str(), mix + 1,
+         names.empty() ? "nothing, it sends silence" : names.c_str());
+  }
   for (auto *source : audioSources) obs_source_release(source);
   settings = obs_data_create();
   obs_data_set_int(settings, "bitrate", bundle.audioBitrateKbps);
