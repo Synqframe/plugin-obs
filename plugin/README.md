@@ -35,8 +35,11 @@ must build against stock OBS without modifications to OBS Studio or libobs.
    scenes are implementation details and are never uploaded as layouts.
 4. The `synqframe_bundle_filter` video filter is the native local adapter. Put
    on any source with video (a scene included), it marks that source as a
-   bundle and holds the bundle's id, resolution, frame rate, bitrate and
-   transport matte; it passes the picture through untouched. The bundle sends
+   bundle and holds the bundle's id, resolution (the source's own size by
+   default), frame rate, bitrate and transport matte; it passes the picture
+   through untouched. The bitrate is automatic by default, worked out from the
+   bundle's size and frame rate when it starts (1080p60 at 6000 kbps, scaled by
+   pixels^0.75 and frame rate^0.6); a creator can set their own instead. The bundle sends
    the source's picture and its own audio (a scene's: everything in it), so a
    mic is tied to a camera with OBS's own controls. Removing or disabling the
    filter makes the source plain OBS again. The old `synqframe_bundle` source
