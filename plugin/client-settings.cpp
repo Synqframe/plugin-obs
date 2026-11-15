@@ -265,3 +265,15 @@ void setGlobalAudioScrubbed(bool scrubbed)
   store.setValue(QStringLiteral("client/globalAudioScrubbed"), scrubbed);
   store.sync();
 }
+
+bool globalMicReturned()
+{
+  return QSettings(settingsPath(), QSettings::IniFormat).value(QStringLiteral("client/globalMicReturned"), false).toBool();
+}
+
+void setGlobalMicReturned()
+{
+  QSettings store(settingsPath(), QSettings::IniFormat);
+  store.setValue(QStringLiteral("client/globalMicReturned"), true);
+  store.sync();
+}

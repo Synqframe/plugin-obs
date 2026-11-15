@@ -90,3 +90,8 @@ bool collaborates(CompositionMode mode);
 // stale copy saved elsewhere never overwrites it.
 bool globalAudioScrubbed();
 void setGlobalAudioScrubbed(bool scrubbed);
+// Whether the one-time return of Mic/Aux has been done: plugins before the Creator bundle carried
+// OBS's mic turned it off in remote mode too; it comes back once (global-audio.cpp), and a mic the
+// creator removes after that stays removed.
+bool globalMicReturned();
+void setGlobalMicReturned();

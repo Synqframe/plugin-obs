@@ -26,7 +26,11 @@ struct PublishRouteConfig { std::string id; std::string sourceUuid; int width=19
   bool flipX=false; bool flipY=false;
   // Send its transparency too, packed: a frame twice the height, the picture above its alpha as
   // grey (bundle background "alpha", synqframe/packed-alpha.hpp).
-  bool packedAlpha=false; };
+  bool packedAlpha=false;
+  // Also send OBS's global Mic/Aux devices (Settings > Audio, output channels 3-6) in this route's
+  // audio, so a creator's mic needs no source of its own (the Creator bundle's default). A device
+  // the route already holds as a source (the same capture device) isn't added twice.
+  bool includeGlobalMic=false; };
 // reservedMixes: OBS audio mixes (bit n = Track n+1) no route may take, such as the track OBS's
 // own streaming output encodes when it carries the program beside these routes.
 struct ProgramConfig { std::string ingestUrl; std::string bearerToken; std::string videoEncoderId; std::string videoEncoderSettings; obs_encoder *sharedProgramVideoEncoder=nullptr; std::vector<PublishRouteConfig> routes; uint32_t reservedMixes=0; };

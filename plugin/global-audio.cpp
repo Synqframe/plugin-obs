@@ -34,11 +34,12 @@ QTimer *recheck = nullptr;
 bool loaded = false;
 QPointer<QMessageBox> notice;
 
-// Removes every global device on and returns their names.
+// Removes every Desktop Audio device on and returns their names. Mic/Aux stays: the Creator
+// bundle sends it.
 QStringList removeGlobalDevices()
 {
   QStringList removed;
-  for (uint32_t channel = FirstDeviceChannel; channel <= LastDeviceChannel; ++channel) {
+  for (uint32_t channel = FirstDeviceChannel; channel < MicChannel; ++channel) {
     obs_source_t *source = obs_get_output_source(channel);
     if (!source) continue;
     const uint32_t flags = obs_source_get_output_flags(source);
@@ -95,17 +96,32 @@ void check()
 {
   if (!loaded) return;
   if (loadClientSettings().compositionMode == CompositionMode::Remote) {
+    // Once: a mic an older plugin turned off here comes back, as the Creator bundle sends it now.
+    if (!globalMicReturned()) {
+      setGlobalMicReturned();
+      if (globalAudioScrubbed()) {
+        const QString mic = restoreDefault(MicChannel, MicSourceId, "Mic/Aux");
+        if (!mic.isEmpty()) {
+          obs_frontend_save();
+          showNotice(QObject::tr("Mic/Aux turned back on"),
+                     QObject::tr("Synqframe turned OBS's Mic/Aux back on, on your system's default microphone. Your "
+                                 "Creator bundle now sends OBS's Mic/Aux devices, so your mic needs no source of its "
+                                 "own. Choose another device in Settings > Audio, or untick \"Include OBS's Mic/Aux "
+                                 "audio\" in the Creator bundle's filter if your mic is already a source in it."));
+        }
+      }
+    }
     const QStringList removed = removeGlobalDevices();
     if (removed.isEmpty()) return;
     setGlobalAudioScrubbed(true);
     // Saved now, so the collection keeps them off even if OBS doesn't exit cleanly.
     obs_frontend_save();
-    showNotice(QObject::tr("Global audio devices turned off"),
-               QObject::tr("Synqframe turned off OBS's global audio devices for remote mode: %1.\n\n"
-                           "In remote mode Synqframe hears your audio only through your bundles. A global device goes "
+    showNotice(QObject::tr("Desktop audio turned off"),
+               QObject::tr("Synqframe turned off OBS's desktop audio for remote mode: %1.\n\n"
+                           "In remote mode Synqframe hears your audio only through your bundles. Desktop audio goes "
                            "straight into your own output instead, skipping the composition and its mix.\n\n"
-                           "Add them as sources in the bundle they belong to: your game's audio in the Content bundle, "
-                           "your microphone in the Creator bundle. They come back when you leave remote mode.")
+                           "Add your game's audio as a source in the Content bundle. Your Mic/Aux devices stay on: the "
+                           "Creator bundle sends them. Desktop audio comes back when you leave remote mode.")
                  .arg(removed.join(QStringLiteral(", "))));
     return;
   }
@@ -114,6 +130,7 @@ void check()
   if (!globalAudioScrubbed()) return;
   setGlobalAudioScrubbed(false);
   QStringList restored;
+  // Mic/Aux too: an older plugin turned it off in remote mode as well.
   for (const QString &name : {restoreDefault(DesktopChannel, DesktopSourceId, "Desktop Audio"),
                               restoreDefault(MicChannel, MicSourceId, "Mic/Aux")})
     if (!name.isEmpty()) restored << name;

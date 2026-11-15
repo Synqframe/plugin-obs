@@ -99,6 +99,42 @@ void collectSourceAudio(obs_source_t *source, std::vector<obs_source_t *> &sourc
     sources.push_back(obs_source_get_ref(source));
 }
 
+// The capture device an audio source records ("device_id"), or empty for anything else.
+std::string captureDevice(obs_source_t *source)
+{
+  obs_data_t *settings = obs_source_get_settings(source);
+  std::string device = settings ? obs_data_get_string(settings, "device_id") : "";
+  obs_data_release(settings);
+  return device;
+}
+
+// OBS's global Mic/Aux devices (output channels 3-6) joined to `sources`: each one on (an audio
+// device, not something else a plugin put there) that isn't the same source type and device as
+// one already there, which would send the mic twice. "default" counts as any device of its type:
+// the system's default mic is most likely the one a source in the bundle names.
+void addGlobalMics(std::vector<obs_source_t *> &sources)
+{
+  constexpr uint32_t FirstMic = 3, LastMic = 6;
+  for (uint32_t channel = FirstMic; channel <= LastMic; ++channel) {
+    obs_source_t *mic = obs_get_output_source(channel);
+    if (!mic) continue;
+    const uint32_t flags = obs_source_get_output_flags(mic);
+    bool add = (flags & OBS_SOURCE_AUDIO) && !(flags & OBS_SOURCE_VIDEO) &&
+               std::find(sources.begin(), sources.end(), mic) == sources.end();
+    if (add) {
+      const std::string device = captureDevice(mic);
+      const char *type = obs_source_get_unversioned_id(mic);
+      for (auto *held : sources)
+        if (std::strcmp(obs_source_get_unversioned_id(held), type) == 0) {
+          const std::string heldDevice = captureDevice(held);
+          if (heldDevice == device || heldDevice == "default" || device == "default") add = false;
+        }
+    }
+    if (add) sources.push_back(mic); // keeps obs_get_output_source's reference
+    else obs_source_release(mic);
+  }
+}
+
 std::vector<obs_source_t *> collectRouteAudio(const PublishRouteConfig &route)
 {
   std::vector<obs_source_t *> sources;
@@ -107,6 +143,7 @@ std::vector<obs_source_t *> collectRouteAudio(const PublishRouteConfig &route)
   if (auto *scene = obs_scene_from_source(root)) collectSceneAudio(scene, sources);
   else if (obs_source_get_output_flags(root) & OBS_SOURCE_AUDIO) sources.push_back(obs_source_get_ref(root));
   obs_source_release(root);
+  if (route.includeGlobalMic) addGlobalMics(sources);
   return sources;
 }
 
