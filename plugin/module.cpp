@@ -1195,6 +1195,13 @@ void deliverLayoutSocketPayload(const QByteArray &payload)
     QMetaObject::invokeMethod(pluginContext, [message] { applyProgramScenes(message); }, Qt::QueuedConnection);
     return;
   }
+  if (message.value("type").toString() == QStringLiteral("keyers.refused")) {
+    // A keyers.commit or keyer.select from OBS the server didn't take; the snapshot after it puts
+    // DSK back as stored.
+    blog(LOG_WARNING, "[Synqframe] The web refused OBS's %s: %s", message.value(QStringLiteral("request")).toString().toUtf8().constData(),
+         message.value(QStringLiteral("detail")).toString().toUtf8().constData());
+    return;
+  }
   if (message.value("type").toString() == QStringLiteral("keyer.select")) {
     const QString keyerId = message.value(QStringLiteral("keyerId")).toString();
     const QString sceneId = message.value(QStringLiteral("sceneId")).toString();
