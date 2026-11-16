@@ -213,8 +213,8 @@ QJsonObject buildState(const ObsFacts &facts, const ClientSettings &settings)
                                           : QJsonArray{QStringLiteral("stream-copy")}},
     {QStringLiteral("programAudioCodecs"), QJsonArray{QStringLiteral("aac"), QStringLiteral("opus")}},
     {QStringLiteral("browserPanel"), facts.browserPanel},
-    // Exeldro's Downstream Keyer answers: the layout then names the keyer scenes instead of
-    // merging the keyer into each scene (downstream-keyer.hpp).
+    // Exeldro's Downstream Keyer answers: the layout then carries the pack's keyers instead of
+    // merging them into each scene (downstream-keyer.hpp).
     {QStringLiteral("downstreamKeyer"), facts.downstreamKeyer},
     {QStringLiteral("remoteStop"), true},
     {QStringLiteral("maxUpload"), true}};

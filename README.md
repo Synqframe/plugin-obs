@@ -16,6 +16,10 @@ describes its design and the rules it follows.
   the page in your own browser.
 - [Aitum Vertical](https://github.com/Aitum/obs-vertical-canvas), optional, for a vertical
   program.
+- [Downstream Keyer](https://obsproject.com/forum/resources/downstream-keyer.1254/), optional,
+  for your layout pack's keyers. Each keyer becomes a Downstream Keyer tab with its scenes, and
+  changes go both ways: a scene you add to a tab, or select, in OBS shows up in Synqframe too.
+  Without it, Synqframe draws the keyers into every scene instead.
 
 ## Installing
 
