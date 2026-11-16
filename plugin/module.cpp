@@ -190,9 +190,14 @@ struct WebScene {
   QString id, name, horizontal, vertical;
 };
 QList<WebScene> webScenes;
-// The layout's keyer scene keys (layout keyerScenes, sent while DSK answers): each one's scene is
-// the canvas's "Synqframe Keyer" (downstream-keyer.hpp), filled and committed like a web scene's.
-QString keyerKeyHorizontal, keyerKeyVertical;
+// The layout's keyer scenes by layout key (layout keyers, sent while DSK answers): each key's
+// scene is that keyer scene's on its canvas (downstream-keyer.hpp), filled and committed like a
+// web scene's.
+struct KeyerSceneKey {
+  QString id;
+  bool vertical = false;
+};
+QHash<QString, KeyerSceneKey> keyerSceneKeys;
 constexpr const char *SceneMark = "synqframe_scene_id";
 // Set on a scene the plugin made for the web; absent on one adopted from the creator. Only a
 // made scene is ever removed when the web drops it (scene-sync.hpp).
@@ -410,8 +415,8 @@ obs_source_t *sceneForId(const QString &id, bool vertical)
 // The OBS scene that shows layout key `key` (a web scene's horizontal or vertical one).
 obs_source_t *sceneForKey(const QString &key)
 {
-  if (!key.isEmpty() && key == keyerKeyHorizontal) return keyerScene(false, true);
-  if (!key.isEmpty() && key == keyerKeyVertical) return keyerScene(true, true);
+  if (const auto keyer = keyerSceneKeys.constFind(key); keyer != keyerSceneKeys.cend())
+    return keyerSceneFor(keyer->id, keyer->vertical);
   for (const WebScene &scene : webScenes) {
     if (scene.horizontal == key) return sceneForId(scene.id, false);
     if (scene.vertical == key) return sceneForId(scene.id, true);
@@ -438,7 +443,8 @@ void syncCanvasScenes(bool vertical)
   std::vector<obs_source_t *> scenes = canvasScenes(vertical);
   std::vector<ExistingScene> existing;
   for (obs_source_t *scene : scenes)
-    existing.push_back({obs_source_get_name(scene), sceneMark(scene).toStdString(), sceneCreated(scene)});
+    // A keyer's scene (downstream-keyer.hpp) is never a web scene's, not even one of the same name.
+    if (!isKeyerScene(scene)) existing.push_back({obs_source_get_name(scene), sceneMark(scene).toStdString(), sceneCreated(scene)});
   obs_source_t *current = vertical ? getVerticalLayoutSceneSource() : obs_frontend_get_current_scene();
   obs_source_t *preview = vertical ? nullptr : obs_frontend_get_current_preview_scene();
   const SceneSyncPlan plan =
@@ -702,6 +708,16 @@ QJsonObject captureLayoutScene(obs_scene_t *scene, const QString &key)
     {"canvasWidth", context.width}, {"canvasHeight", context.height}, {"slots", context.items}};
 }
 
+// The keyer scenes too: an OBS edit to one commits to its key, like a web scene's (msg 1510).
+void captureKeyerLayouts(QHash<QString, QJsonObject> &layouts)
+{
+  for (auto it = keyerSceneKeys.cbegin(); it != keyerSceneKeys.cend(); ++it)
+    if (obs_source_t *scene = keyerSceneFor(it->id, it->vertical)) {
+      layouts.insert(it.key(), captureLayoutScene(obs_scene_from_source(scene), it.key()));
+      obs_source_release(scene);
+    }
+}
+
 QHash<QString, QJsonObject> captureObsLayouts()
 {
   QHash<QString, QJsonObject> layouts;
@@ -715,16 +731,10 @@ QHash<QString, QJsonObject> captureObsLayouts()
           obs_source_release(scene);
         }
       }
-    // The keyer scenes too: an OBS edit to one commits to keyer_h / keyer_v (msg 1503).
-    for (const auto &[key, vertical] : {std::pair{keyerKeyHorizontal, false}, std::pair{keyerKeyVertical, true}}) {
-      if (key.isEmpty()) continue;
-      if (obs_source_t *scene = keyerScene(vertical, false)) {
-        layouts.insert(key, captureLayoutScene(obs_scene_from_source(scene), key));
-        obs_source_release(scene);
-      }
-    }
+    captureKeyerLayouts(layouts);
     return layouts;
   }
+  captureKeyerLayouts(layouts);
   obs_source_t *horizontal = obs_frontend_get_current_scene();
   if (horizontal) {
     layouts.insert(QStringLiteral("horizontal"), captureLayoutScene(obs_scene_from_source(horizontal), QStringLiteral("horizontal")));
@@ -1027,9 +1037,16 @@ void applyCentralLayout(const QJsonObject &document)
     scenes.insert(scene.value("key").toString(), scene);
   }
   webScenes.clear();
-  const QJsonObject keyerScenes = document.value(QStringLiteral("keyerScenes")).toObject();
-  keyerKeyHorizontal = keyerScenes.value(QStringLiteral("horizontal")).toString();
-  keyerKeyVertical = keyerScenes.value(QStringLiteral("vertical")).toString();
+  // The keyers (sent only while DSK answers): absent, the web merged them into each scene.
+  std::optional<std::vector<KeyerModel>> keyers;
+  if (document.value(QStringLiteral("keyers")).isArray()) keyers = readKeyers(document.value(QStringLiteral("keyers")).toArray());
+  keyerSceneKeys.clear();
+  if (keyers)
+    for (const KeyerModel &keyer : *keyers)
+      for (const KeyerSceneModel &scene : keyer.scenes) {
+        if (!scene.horizontal.empty()) keyerSceneKeys.insert(QString::fromStdString(scene.horizontal), {QString::fromStdString(scene.id), false});
+        if (!scene.vertical.empty()) keyerSceneKeys.insert(QString::fromStdString(scene.vertical), {QString::fromStdString(scene.id), true});
+      }
   // layoutScenes present but empty: this layout has no scenes of its own (Just Chatting after a
   // game's pack), so the scenes we made for another are put away like any the web drops. Absent (a
   // server from before scenes): the scenes are left as they are.
@@ -1058,6 +1075,7 @@ void applyCentralLayout(const QJsonObject &document)
       obs_canvas_release(canvas);
       syncCanvasScenes(true);
     }
+    applyDownstreamKeyers(keyers);
     for (auto it = scenes.cbegin(); it != scenes.cend(); ++it)
       if (obs_source_t *source = sceneForKey(it.key())) {
         applyLayoutScene(obs_scene_from_source(source), it.value(), viewerId, true);
@@ -1071,6 +1089,13 @@ void applyCentralLayout(const QJsonObject &document)
         syncCanvasScenes(true);
       }
     }
+    applyDownstreamKeyers(keyers);
+    for (auto it = keyerSceneKeys.cbegin(); it != keyerSceneKeys.cend(); ++it)
+      if (scenes.contains(it.key()))
+        if (obs_source_t *source = keyerSceneFor(it->id, it->vertical)) {
+          applyLayoutScene(obs_scene_from_source(source), scenes.value(it.key()), viewerId, true);
+          obs_source_release(source);
+        }
     obs_source_t *horizontalSource = obs_frontend_get_current_scene();
     if (horizontalSource) {
       applyLayoutScene(obs_scene_from_source(horizontalSource), scenes.value("horizontal"), viewerId);
@@ -1081,21 +1106,6 @@ void applyCentralLayout(const QJsonObject &document)
       applyLayoutScene(obs_scene_from_source(verticalSource), scenes.value("vertical"), viewerId);
       obs_source_release(verticalSource);
     }
-  }
-  // The keyer scenes on DSK, hidden on the keyerExclude scenes of their canvas.
-  {
-    QStringList excludeHorizontal, excludeVertical;
-    for (const QJsonValue &value : document.value(QStringLiteral("keyerExclude")).toArray())
-      for (const WebScene &web : webScenes) {
-        const QString key = value.toString();
-        if (key.isEmpty() || (key != web.horizontal && key != web.vertical)) continue;
-        const bool vertical = key == web.vertical;
-        if (obs_source_t *scene = sceneForId(web.id, vertical)) {
-          (vertical ? excludeVertical : excludeHorizontal) << QString::fromUtf8(obs_source_get_name(scene));
-          obs_source_release(scene);
-        }
-      }
-    applyDownstreamKeyer(!keyerKeyHorizontal.isEmpty(), !keyerKeyVertical.isEmpty(), excludeHorizontal, excludeVertical);
   }
   // Visibility and mute changes alter only mixer membership; update it in
   // place so director operations do not restart encoders or viewer sessions.
@@ -1183,6 +1193,12 @@ void deliverLayoutSocketPayload(const QByteArray &payload)
   if (pluginSignalsMessage(message)) return; // signal.ack, signal.error
   if (message.value("type").toString() == QStringLiteral("program.scene")) {
     QMetaObject::invokeMethod(pluginContext, [message] { applyProgramScenes(message); }, Qt::QueuedConnection);
+    return;
+  }
+  if (message.value("type").toString() == QStringLiteral("keyer.select")) {
+    const QString keyerId = message.value(QStringLiteral("keyerId")).toString();
+    const QString sceneId = message.value(QStringLiteral("sceneId")).toString();
+    QMetaObject::invokeMethod(pluginContext, [keyerId, sceneId] { selectKeyerScene(keyerId, sceneId); }, Qt::QueuedConnection);
     return;
   }
   if (message.value("type").toString() != QStringLiteral("layout.snapshot")) return;
@@ -1608,6 +1624,20 @@ void frontendEvent(enum obs_frontend_event event, void *)
 void createPluginContext()
 {
   pluginContext = new QObject();
+  setKeyerHooks({
+    [](const QString &id, bool vertical) {
+      obs_source_t *scene = sceneForId(id, vertical);
+      const QString name = scene ? QString::fromUtf8(obs_source_get_name(scene)) : QString();
+      if (scene) obs_source_release(scene);
+      return name;
+    },
+    [](obs_source_t *scene) { return sceneMark(scene); },
+    [](const QString &key, const QJsonObject &message) {
+      if (!layoutSocket) return;
+      const QByteArray payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
+      layoutSocket->send(key.toStdString(), std::string(payload.constData(), static_cast<size_t>(payload.size())));
+    },
+  });
   // Qt WebSockets is not part of the portable OBS runtime, so keep the
   // centralized layout responsive with a lightweight revision-aware poll.
   layoutRefreshTimer = new QTimer(pluginContext);

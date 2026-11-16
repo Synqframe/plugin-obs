@@ -47,6 +47,7 @@ target_sources(
     bpm-output.cpp
     bpm-output.hpp
     scene-sync.hpp
+    keyer-sync.hpp
 )
 
 target_include_directories(synqframe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_SOURCE_DIR}"
@@ -76,6 +77,11 @@ target_compile_features(network-request-test PRIVATE cxx_std_20)
 add_executable(scene-sync-test tests/scene-sync-test.cpp)
 target_include_directories(scene-sync-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(scene-sync-test PRIVATE cxx_std_20)
+
+# A creator's Downstream Keyer edits read as layout keyer edits (keyer-sync.hpp); no OBS, no Qt.
+add_executable(keyer-sync-test tests/keyer-sync-test.cpp)
+target_include_directories(keyer-sync-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(keyer-sync-test PRIVATE cxx_std_20)
 
 # The layout's stacking rule (layout-stacking.hpp); no OBS, no Qt.
 add_executable(layout-stacking-test tests/layout-stacking-test.cpp)
