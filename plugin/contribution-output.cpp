@@ -415,10 +415,10 @@ void destroyOutput(void *data)
 // instead: a 256x144 encode at about 1 fps, on the GPU where OBS has an encoder there. OBS sets
 // its own encoder back on the output at every Start Streaming, so no other mode sees this.
 //
-// The ladder needs it too: OBS's encoder is its top rung, in its encoder group. An encoder this
-// output also kept running never stopped when the ladder dropped, so libobs kept the group's old
-// start timestamp and the reconnected ladder's other rungs waited for that frame for ever: the
-// ladder reconnected and sent nothing until the ingest closed it (live test 2026-10-30).
+// The ladder needs it too. Its rungs are encoders of their own (multitrack-publish.cpp build), so
+// OBS's encoder would only run unused at OBS's output size. (It was once the top rung: kept
+// running by this output, it never stopped when the ladder dropped, and the reconnected ladder's
+// other rungs waited for ever on the group's old start, live test 2026-10-30.)
 bool attachStandInEncoder(ContributionOutput *context, const obs_video_info &video, const char *mode)
 {
   if (context->standIn) {
@@ -934,15 +934,15 @@ bool startOutput(void *data)
     return false;
   }
   if (multitrack) {
-    // OBS's streaming encoders carry the ladder's top rung and its audio; the bundles keep off
-    // that audio track.
+    // OBS's streaming audio encoder carries the ladder's audio; the bundles keep off that audio
+    // track. Its video encoder is no rung (multitrack-publish.cpp build).
     obs_encoder_t *programAudio = obs_output_get_audio_encoder(context->output, 0);
     QString ladderError;
-    if (!multitrack->build(obs_output_get_video_encoder(context->output), programAudio, ladderError)) {
+    if (!multitrack->build(programAudio, ladderError)) {
       obs_output_set_last_error(context->output, ladderError.toUtf8().constData());
       return false;
     }
-    // The ladder alone runs OBS's encoder, so it can stop and start again with the ladder.
+    // OBS's streaming video encoder would otherwise run unused at OBS's output size.
     if (!attachStandInEncoder(context, video, "the ladder"))
       blog(LOG_WARNING, "[Synqframe] No stand-in encoder: the ladder goes out, but can't come back if it drops");
     config.reservedMixes = 1u << obs_encoder_get_mixer_index(programAudio);
