@@ -6,8 +6,8 @@
 
 // The program as OBS's Enhanced Broadcasting would publish it (composer self): the ladder from
 // the GoLive endpoint (golive.hpp), encoded on OBS's encoders and sent as one multitrack Enhanced
-// RTMP publish. OBS's own streaming encoders are reused: its video encoder becomes the main
-// canvas's top rung, its audio encoder the publish's audio.
+// RTMP publish. Every rung is an encoder of its own, as the answer describes it; OBS's streaming
+// audio encoder is the publish's audio.
 
 #include "golive.hpp"
 #include "bpm-output.hpp"
@@ -30,9 +30,9 @@ public:
   // canvas). Blocks on the network for at most 5 seconds, as OBS does.
   GoLiveOutcome request(const QString &url, const QString &streamKey, obs_canvas_t *vertical,
                         std::optional<uint32_t> maximumAggregateBitrate, QString &error);
-  // Builds the encoders and the output from the ladder. `programVideo` and `programAudio` are
-  // OBS's streaming encoders, attached to the Synqframe output.
-  bool build(obs_encoder_t *programVideo, obs_encoder_t *programAudio, QString &error);
+  // Builds the encoders and the output from the ladder. `programAudio` is OBS's streaming audio
+  // encoder, attached to the Synqframe output.
+  bool build(obs_encoder_t *programAudio, QString &error);
   bool start(QString &error);
   void stop();
 
@@ -49,7 +49,7 @@ private:
   obs_output_t *output_ = nullptr;
   obs_service_t *service_ = nullptr;
   obs_encoder_group_t *group_ = nullptr;
-  std::vector<obs_encoder_t *> encoders_; // references, OBS's shared ones included
+  std::vector<obs_encoder_t *> encoders_; // references, OBS's shared audio encoder included
   // Twitch's Broadcast Performance Metrics SEI on every rung's keyframes, as OBS's own Enhanced
   // Broadcasting injects them (MultitrackVideoOutput.cpp bpm_inject); the compositor's code.
   synqframe::BpmOutput bpm_;

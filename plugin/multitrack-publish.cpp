@@ -188,11 +188,11 @@ GoLiveOutcome MultitrackPublish::request(const QString &url, const QString &stre
   return GoLiveOutcome::Ready;
 }
 
-bool MultitrackPublish::build(obs_encoder_t *programVideo, obs_encoder_t *programAudio, QString &error)
+bool MultitrackPublish::build(obs_encoder_t *programAudio, QString &error)
 {
   release();
-  if (!programVideo || !programAudio) {
-    error = QStringLiteral("OBS did not attach its streaming encoders.");
+  if (!programAudio) {
+    error = QStringLiteral("OBS did not attach its streaming audio encoder.");
     return false;
   }
   if (config_.rungs.size() > MAX_OUTPUT_VIDEO_ENCODERS) {
@@ -206,15 +206,11 @@ bool MultitrackPublish::build(obs_encoder_t *programVideo, obs_encoder_t *progra
     release();
     return false;
   }
-  // The main canvas's largest rung is OBS's own streaming encoder, set to the rung, so OBS
-  // never encodes its program twice.
-  qsizetype top = -1;
-  for (qsizetype index = 0; index < config_.rungs.size(); ++index) {
-    const GoLiveRung &rung = config_.rungs[index];
-    if (rung.canvasIndex == 0 &&
-        (top < 0 || rung.width * rung.height > config_.rungs[top].width * config_.rungs[top].height))
-      top = index;
-  }
+  // Every rung is an encoder of its own, of the answer's type at the answer's size, as OBS's
+  // Enhanced Broadcasting makes them. OBS's streaming encoder is no rung: it encodes at OBS's
+  // output size with the person's own settings (scene-cut keyframes on x264), and Twitch drops a
+  // ladder whose tracks differ from its answer in size or keyframes (live test 2026-11-17: a
+  // 2560x1440 x264 top against a 1280x720 answer, dropped every 3 s).
   for (qsizetype index = 0; index < config_.rungs.size(); ++index) {
     const GoLiveRung &rung = config_.rungs[index];
     obs_canvas_t *canvas = rung.canvasIndex == 0 ? obs_get_main_canvas() : obs_canvas_get_ref(vertical_);
@@ -222,50 +218,24 @@ bool MultitrackPublish::build(obs_encoder_t *programVideo, obs_encoder_t *progra
     const bool haveVideo = canvas && obs_canvas_get_video_info(canvas, &video);
     obs_encoder_t *encoder = nullptr;
     obs_data_t *settings = rungSettings(rung);
-    if (index == top) {
-      encoder = obs_encoder_get_ref(programVideo);
-      const char *ownType = obs_encoder_get_id(encoder);
-      if (rung.type.toUtf8() != ownType) {
-        // Another encoder's settings may not apply: keep the rate the ladder sets, nothing else.
-        obs_data_t *rate = obs_data_create();
-        for (const char *name : {"bitrate", "max_bitrate", "rate_control", "keyint_sec", "bf"})
-          if (obs_data_has_user_value(settings, name)) {
-            obs_data_item_t *item = obs_data_item_byname(settings, name);
-            if (obs_data_item_gettype(item) == OBS_DATA_STRING)
-              obs_data_set_string(rate, name, obs_data_get_string(settings, name));
-            else
-              obs_data_set_int(rate, name, obs_data_get_int(settings, name));
-            obs_data_item_release(&item);
-          }
-        obs_data_release(settings);
-        settings = rate;
-        blog(LOG_INFO, "[Synqframe] The top rung uses OBS's own encoder (%s) instead of %s", ownType,
-             rung.type.toUtf8().constData());
-      }
-      obs_encoder_update(encoder, settings);
-      if (haveVideo && (static_cast<int>(video.output_width) != rung.width || static_cast<int>(video.output_height) != rung.height))
-        blog(LOG_WARNING, "[Synqframe] OBS's output is %ux%u; the top rung asks for %dx%d", video.output_width,
-             video.output_height, rung.width, rung.height);
+    if (!encoderAvailable(rung.type)) {
+      error = QStringLiteral("This OBS has no %1 encoder for the program ladder.").arg(rung.type);
+    } else if (!haveVideo) {
+      error = rung.canvasIndex == 0 ? QStringLiteral("OBS's canvas is not ready.") : QStringLiteral("The Vertical canvas is not ready.");
     } else {
-      if (!encoderAvailable(rung.type)) {
-        error = QStringLiteral("This OBS has no %1 encoder for the program ladder.").arg(rung.type);
-      } else if (!haveVideo) {
-        error = QStringLiteral("The Vertical canvas is not ready.");
+      const QByteArray name = QStringLiteral("Synqframe program ladder %1").arg(index).toUtf8();
+      encoder = obs_video_encoder_create(rung.type.toUtf8().constData(), name.constData(), settings, nullptr);
+      if (encoder) {
+        obs_encoder_set_video(encoder, obs_canvas_get_video(canvas));
+        obs_encoder_set_scaled_size(encoder, static_cast<uint32_t>(rung.width), static_cast<uint32_t>(rung.height));
+        obs_encoder_set_gpu_scale_type(encoder, OBS_SCALE_BICUBIC);
+        obs_encoder_set_preferred_video_format(encoder, VIDEO_FORMAT_NV12);
+        obs_encoder_set_preferred_color_space(encoder, VIDEO_CS_709);
+        obs_encoder_set_preferred_range(encoder, VIDEO_RANGE_PARTIAL);
+        const uint32_t divisor = frameRateDivisor(video, rung);
+        if (divisor > 1) obs_encoder_set_frame_rate_divisor(encoder, divisor);
       } else {
-        const QByteArray name = QStringLiteral("Synqframe program ladder %1").arg(index).toUtf8();
-        encoder = obs_video_encoder_create(rung.type.toUtf8().constData(), name.constData(), settings, nullptr);
-        if (encoder) {
-          obs_encoder_set_video(encoder, obs_canvas_get_video(canvas));
-          obs_encoder_set_scaled_size(encoder, static_cast<uint32_t>(rung.width), static_cast<uint32_t>(rung.height));
-          obs_encoder_set_gpu_scale_type(encoder, OBS_SCALE_BICUBIC);
-          obs_encoder_set_preferred_video_format(encoder, VIDEO_FORMAT_NV12);
-          obs_encoder_set_preferred_color_space(encoder, VIDEO_CS_709);
-          obs_encoder_set_preferred_range(encoder, VIDEO_RANGE_PARTIAL);
-          const uint32_t divisor = frameRateDivisor(video, rung);
-          if (divisor > 1) obs_encoder_set_frame_rate_divisor(encoder, divisor);
-        } else {
-          error = QStringLiteral("OBS could not create the %1 encoder for the program ladder.").arg(rung.type);
-        }
+        error = QStringLiteral("OBS could not create the %1 encoder for the program ladder.").arg(rung.type);
       }
     }
     obs_data_release(settings);
