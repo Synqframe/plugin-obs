@@ -52,6 +52,10 @@ struct ClientSettings {
   // authorize. The key is a credential: in memory only, never saved or logged.
   QString goLiveUrl;
   QString goLiveStreamKey;
+  // goLive.required (schemas 3ce6f96, a Free plan): the program goes out only as the RTMPS
+  // ladder, never over SRT; requiredReason is what Start Streaming says when it can't.
+  bool goLiveRequired = false;
+  QString goLiveRequiredReason;
   QString layoutScope = QStringLiteral("category");
   QString layoutOrientation = QStringLiteral("horizontal");
   int baseVideoBitrate = 6000;

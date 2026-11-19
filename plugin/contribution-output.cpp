@@ -215,6 +215,8 @@ bool authorizeContribution(ClientSettings &settings, QString &error, bool persis
   const QJsonObject goLive = response.value(QStringLiteral("goLive")).toObject();
   settings.goLiveUrl = goLive.value(QStringLiteral("url")).toString();
   settings.goLiveStreamKey = goLive.value(QStringLiteral("streamKey")).toString();
+  settings.goLiveRequired = goLive.value(QStringLiteral("required")).toBool(false);
+  settings.goLiveRequiredReason = goLive.value(QStringLiteral("requiredReason")).toString();
   readCurrentShow(settings, response.value(QStringLiteral("currentShow")).toObject());
   if (persist) saveClientSettings(settings);
   return true;
@@ -908,11 +910,22 @@ bool startOutput(void *data)
       return false;
     }
     if (outcome == GoLiveOutcome::Unreachable) {
-      blog(LOG_WARNING, "[Synqframe] No program ladder (%s); publishing the program over SRT instead",
-           ladderError.toUtf8().constData());
+      blog(LOG_WARNING, "[Synqframe] No program ladder (%s); %s", ladderError.toUtf8().constData(),
+           settings.goLiveRequired ? "the plan allows no SRT program, so the stream doesn't start"
+                                   : "publishing the program over SRT instead");
       multitrack.reset();
     }
     if (multitrack && !multitrack->warning().isEmpty()) warnGoLive(multitrack->warning());
+  }
+  // goLive.required: no ladder means no program, never the SRT one (bundles keep SRT).
+  if (selfComposed && programRoute(!settings.goLiveUrl.isEmpty() && !settings.goLiveStreamKey.isEmpty(), multitrack != nullptr,
+                                   settings.goLiveRequired) == ProgramRoute::Fail) {
+    const QString error = !settings.goLiveRequiredReason.isEmpty()
+                            ? settings.goLiveRequiredReason
+                            : QStringLiteral("Your Synqframe plan streams over RTMPS only, and the Synqframe Go Live service "
+                                             "could not be reached. Try again.");
+    obs_output_set_last_error(context->output, error.toUtf8().constData());
+    return false;
   }
   if (selfComposed && !multitrack)
     routeError = addProgramRoutes(settings, video, videoBitrate, audioBitrate, config);
