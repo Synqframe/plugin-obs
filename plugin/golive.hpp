@@ -51,6 +51,16 @@ struct GoLiveFacts {
 
 QJsonObject goLivePostData(const GoLiveFacts &facts);
 
+// composer self: how Start Streaming publishes the program. `goLive`: authorize gave a url and
+// key; `ladder`: the endpoint answered with one (a refusal stops the start before this, as in OBS);
+// `required`: authorize's goLive.required (schemas 3ce6f96, a Free plan), which leaves no SRT.
+enum class ProgramRoute { Ladder, Srt, Fail };
+inline ProgramRoute programRoute(bool goLive, bool ladder, bool required)
+{
+  if (goLive && ladder) return ProgramRoute::Ladder;
+  return required ? ProgramRoute::Fail : ProgramRoute::Srt;
+}
+
 struct GoLiveRung {
   QString type; // a libobs encoder id
   int width = 0, height = 0, fpsNum = 0, fpsDen = 1;

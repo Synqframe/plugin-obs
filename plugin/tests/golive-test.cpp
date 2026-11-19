@@ -131,6 +131,15 @@ int main(int argc, char **argv)
   noIngest.remove(QStringLiteral("ingest_endpoints"));
   CHECK(!parseGoLiveAnswer(noIngest, 2, facts.streamKey, error, refused) && !refused);
 
+  // How the program goes out: the ladder when there is one; else SRT, unless goLive.required (a
+  // Free plan, schemas 3ce6f96), where no ladder means no stream.
+  CHECK(programRoute(true, true, false) == ProgramRoute::Ladder);
+  CHECK(programRoute(true, true, true) == ProgramRoute::Ladder);
+  CHECK(programRoute(true, false, false) == ProgramRoute::Srt);  // the endpoint unreachable
+  CHECK(programRoute(false, false, false) == ProgramRoute::Srt); // a server with no goLive
+  CHECK(programRoute(true, false, true) == ProgramRoute::Fail);
+  CHECK(programRoute(false, false, true) == ProgramRoute::Fail);
+
   for (int index = 1; index + 1 < argc; ++index)
     if (QByteArray(argv[index]) == "--dump") {
       write(QString::fromLocal8Bit(argv[index + 1]), "golive-request.json", post);
