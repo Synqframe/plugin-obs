@@ -211,6 +211,9 @@ struct ProgramScenes {
   bool operator==(const ProgramScenes &) const = default;
 };
 std::optional<ProgramScenes> agreedProgram;
+// The creator's own scene (no web id) that was on air when the web last switched live to one of
+// its scenes, by UUID: program.scene's live null (BRB off) puts it back.
+QString ownSceneBeforeWeb;
 QTimer *programSendTimer = nullptr;
 
 QString sceneMark(obs_source_t *scene)
@@ -570,6 +573,8 @@ void sendProgramScenes()
   blog(LOG_INFO, "[Synqframe] Program state sent: live %s, preview %s", now.live.toUtf8().constData(),
        now.preview.isEmpty() ? "none (studio mode off)" : now.preview.toUtf8().constData());
   const bool liveChanged = now.live != agreedProgram->live;
+  // The creator switched live themselves: a later live null has no own scene of theirs to go back to.
+  if (liveChanged) ownSceneBeforeWeb.clear();
   agreedProgram = now;
   QJsonObject message{{QStringLiteral("type"), QStringLiteral("program.scene")}, {QStringLiteral("origin"), QStringLiteral("obs")},
                       {QStringLiteral("live"), now.live},
@@ -588,9 +593,14 @@ void applyProgramScenes(const QJsonObject &state)
     return std::any_of(webScenes.cbegin(), webScenes.cend(), [&id](const WebScene &scene) { return scene.id == id; });
   };
   ProgramScenes want = agreedProgram.value_or(obsProgramScenes());
+  // live null: back to the creator's own scene from before the web's last live switch, if any.
+  bool restoreOwn = false;
   if (const QJsonValue live = state.value(QStringLiteral("live")); live.isString()) {
     if (known(live.toString())) want.live = live.toString();
     else blog(LOG_WARNING, "[Synqframe] Ignored live scene %s: not one of the web's scenes", live.toString().toUtf8().constData());
+  } else if (live.isNull() && state.contains(QStringLiteral("live")) && !ownSceneBeforeWeb.isEmpty()) {
+    restoreOwn = true;
+    want.live.clear();
   }
   if (state.contains(QStringLiteral("preview"))) {
     const QJsonValue preview = state.value(QStringLiteral("preview"));
@@ -610,15 +620,24 @@ void applyProgramScenes(const QJsonObject &state)
       obs_source_release(scene);
     }
   }
-  if (!want.live.isEmpty()) {
+  if (restoreOwn) {
+    if (obs_source_t *own = obs_get_source_by_uuid(ownSceneBeforeWeb.toUtf8().constData())) {
+      blog(LOG_INFO, "[Synqframe] Back to the creator's own scene '%s'", obs_source_get_name(own));
+      obs_frontend_set_current_scene(own);
+      obs_source_release(own);
+    }
+    ownSceneBeforeWeb.clear();
+  } else if (!want.live.isEmpty()) {
     obs_source_t *current = obs_frontend_get_current_scene();
     const bool already = current && sceneMark(current) == want.live;
-    if (current) obs_source_release(current);
-    if (!already)
+    if (!already) {
+      if (current && sceneMark(current).isEmpty()) ownSceneBeforeWeb = QString::fromUtf8(obs_source_get_uuid(current));
       if (obs_source_t *scene = sceneForId(want.live, false)) {
         obs_frontend_set_current_scene(scene);
         obs_source_release(scene);
       }
+    }
+    if (current) obs_source_release(current);
     switchVerticalTo(want.live);
   }
 }
