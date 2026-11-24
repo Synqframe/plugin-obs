@@ -122,6 +122,11 @@ obs_data_t *rungSettings(const GoLiveRung &rung)
   obs_data_t *settings = obs_data_create_from_json(json.constData());
   if (!settings) settings = obs_data_create();
   obs_data_set_bool(settings, "disable_scenecut", true);
+  // AMF's own default preset is "quality", its slowest: four AMF encodes (two rungs and two
+  // bundles) filled an RX 6750 XT's video engine to 98% (2026-11-24). "balanced" unless the answer
+  // names one.
+  if (rung.type.contains(QStringLiteral("amf")) && !obs_data_has_user_value(settings, "preset"))
+    obs_data_set_string(settings, "preset", "balanced"); // a default would lose to the encoder's own
   return settings;
 }
 

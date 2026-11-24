@@ -392,6 +392,11 @@ bool ProgramPublisher::buildRoute(const PublishRouteConfig &bundle, ChannelOutpu
       if (videoId_.find("amf") != std::string::npos) obs_data_set_string(settings, "preset", "speed");
       else if (videoId_.find("nvenc") != std::string::npos) obs_data_set_string(settings, "preset", "p2");
       else if (videoId_.find("x264") != std::string::npos) obs_data_set_string(settings, "preset", "veryfast");
+    } else if (videoId_.find("amf") != std::string::npos) {
+      // AMF defaults to "quality", its slowest; "balanced" unless the person's settings name one
+      // (four AMF encodes filled an RX 6750 XT's video engine to 98%, 2026-11-24).
+      // (A default would lose to the encoder's own, applied when it is created.)
+      if (!obs_data_has_user_value(settings, "preset")) obs_data_set_string(settings, "preset", "balanced");
     }
     item.videoEncoder = obs_video_encoder_create(videoId_.c_str(), name.c_str(), settings, nullptr);
     obs_data_release(settings);

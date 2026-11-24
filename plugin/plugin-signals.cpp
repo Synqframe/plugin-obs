@@ -4,6 +4,8 @@
 #include "plugin-signals.hpp"
 
 #include "bundle-filter.hpp"
+#include "client-settings.hpp"
+#include "network-request.hpp"
 
 #include <synqframe/capture-time-stamper.hpp>
 #include <synqframe/speech-detector.hpp>
@@ -26,6 +28,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -52,6 +55,13 @@ std::function<void(const std::string &)> sendPayload;
 QTimer *resendTimer = nullptr;
 QTimer *watchTimer = nullptr;
 obs_hotkey_id highlightHotkey = OBS_INVALID_HOTKEY_ID;
+// Be right back: POST /api/me/show/brb {on} (manager-only; the server switches the show to its
+// pack's brb scene and back, msgs 1640/1645). The hotkey asks for the opposite of what the server
+// last answered; the answer ({on}) is the truth, so a retried call can't flip it twice.
+constexpr const char *BrbHotkeyName = "synqframe_brb";
+obs_hotkey_id brbHotkey = OBS_INVALID_HOTKEY_ID;
+bool brbOn = false;
+bool brbInFlight = false;
 
 void flush();
 
@@ -286,18 +296,58 @@ void onHighlight(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
     blog(LOG_INFO, "[Synqframe] Highlight: the recording format takes no chapters");
 }
 
+void toggleBrb()
+{
+  if (brbInFlight || !context) return;
+  const ClientSettings settings = loadClientSettings();
+  if (settings.accessToken.isEmpty()) {
+    blog(LOG_INFO, "[Synqframe] Be right back: not signed in");
+    return;
+  }
+  brbInFlight = true;
+  const bool want = !brbOn;
+  asyncHttp(context, synqframeCall(settings, "POST", QStringLiteral("/api/me/show/brb"), QJsonObject{{QStringLiteral("on"), want}}),
+            [want](const HttpReply &reply) {
+              brbInFlight = false;
+              if (reply.status == 401) {
+                requestCredentialRefresh();
+                blog(LOG_INFO, "[Synqframe] Be right back: the sign-in is being renewed; press it again");
+              } else if (reply.status == 403) {
+                blog(LOG_WARNING, "[Synqframe] Be right back: only the show's managers can switch it");
+              } else if (reply.status == 404) {
+                blog(LOG_INFO, "[Synqframe] Be right back: no show to switch");
+              } else if (!reply.ok()) {
+                blog(LOG_WARNING, "[Synqframe] Be right back: the service answered %d", reply.status);
+              } else {
+                const QJsonValue on = reply.json().value(QStringLiteral("on"));
+                brbOn = on.isBool() ? on.toBool() : want;
+                blog(LOG_INFO, "[Synqframe] Be right back: %s", brbOn ? "on" : "off");
+              }
+            });
+}
+
+void onBrb(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+  // Hotkeys fire on OBS's hotkey thread; the call goes out from the UI thread.
+  if (pressed && context) QMetaObject::invokeMethod(context, [] { toggleBrb(); }, Qt::QueuedConnection);
+}
+
+void loadHotkey(obs_data_t *saved, const char *name, obs_hotkey_id id)
+{
+  obs_data_array_t *keys = saved ? obs_data_get_array(saved, name) : nullptr;
+  if (!keys) return;
+  obs_hotkey_load(id, keys);
+  obs_data_array_release(keys);
+}
+
 void registerHotkey()
 {
   highlightHotkey = obs_hotkey_register_frontend(HotkeyName, "Synqframe: mark this moment", onHighlight, nullptr);
+  brbHotkey = obs_hotkey_register_frontend(BrbHotkeyName, "Synqframe: be right back (on/off)", onBrb, nullptr);
   obs_data_t *saved = obs_data_create_from_json_file(hotkeyFile().toUtf8().constData());
-  if (saved) {
-    obs_data_array_t *keys = obs_data_get_array(saved, HotkeyName);
-    if (keys) {
-      obs_hotkey_load(highlightHotkey, keys);
-      obs_data_array_release(keys);
-    }
-    obs_data_release(saved);
-  }
+  loadHotkey(saved, HotkeyName, highlightHotkey);
+  loadHotkey(saved, BrbHotkeyName, brbHotkey);
+  if (saved) obs_data_release(saved);
 }
 
 } // namespace
@@ -344,7 +394,8 @@ void stopPluginSignals()
   stopWatchingCaptures();
   detachSpeech();
   if (highlightHotkey != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(highlightHotkey);
-  highlightHotkey = OBS_INVALID_HOTKEY_ID;
+  if (brbHotkey != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(brbHotkey);
+  highlightHotkey = brbHotkey = OBS_INVALID_HOTKEY_ID;
   sendPayload = nullptr;
   context = nullptr;
 }
@@ -352,15 +403,18 @@ void stopPluginSignals()
 void savePluginSignalHotkeys()
 {
   if (highlightHotkey == OBS_INVALID_HOTKEY_ID) return;
-  obs_data_array_t *keys = obs_hotkey_save(highlightHotkey);
   obs_data_t *saved = obs_data_create();
-  obs_data_set_array(saved, HotkeyName, keys);
+  for (const auto &[name, id] : {std::pair{HotkeyName, highlightHotkey}, std::pair{BrbHotkeyName, brbHotkey}}) {
+    if (id == OBS_INVALID_HOTKEY_ID) continue;
+    obs_data_array_t *keys = obs_hotkey_save(id);
+    obs_data_set_array(saved, name, keys);
+    obs_data_array_release(keys);
+  }
   char *dir = obs_module_config_path("");
   os_mkdirs(dir);
   bfree(dir);
   obs_data_save_json_safe(saved, hotkeyFile().toUtf8().constData(), "tmp", "bak");
   obs_data_release(saved);
-  obs_data_array_release(keys);
 }
 
 void pluginSignalsConnected()
