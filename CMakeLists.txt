@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28...3.30)
-project(synqframe-obs-plugin VERSION 0.3.0 LANGUAGES C CXX)
+project(synqframe-obs-plugin VERSION 0.4.0 LANGUAGES C CXX)
 
 if(DEFINED OBS_SOURCE_DIR)
   file(TO_CMAKE_PATH "${OBS_SOURCE_DIR}" OBS_SOURCE_CMAKE_DIR)
