@@ -52,6 +52,7 @@ constexpr const char *KeyComposer = "composition.composer";
 constexpr const char *KeyCollaborate = "composition.collaborate";
 constexpr const char *KeyVerticalProgram = "composition.localVerticalProgram";
 constexpr const char *KeyAudioCodec = "composition.programAudioCodec";
+constexpr const char *KeyUploadBundles = "composition.uploadBundles";
 constexpr const char *KeyRoutes = "routes";
 // Retired: always false; Native is the only stock OBS.
 constexpr const char *KeyOwnStreamSettings = "ownStreamSettings";
@@ -86,7 +87,8 @@ struct HeldComposition {
   std::optional<CompositionMode> mode;
   std::optional<bool> localVerticalProgram;
   std::optional<QString> programAudioCodec;
-  bool any() const { return mode || localVerticalProgram || programAudioCodec; }
+  std::optional<bool> uploadBundles;
+  bool any() const { return mode || localVerticalProgram || programAudioCodec || uploadBundles; }
 };
 int appliedRevision = 0;
 HeldComposition held;
@@ -308,6 +310,17 @@ void persistAppliedRevision()
   saveClientSettings(latest);
 }
 
+// Taken at Start Streaming (contribution-output.cpp uploadsBundles), so it's only saved while no
+// feeds publish: a bundle shown again mid-stream follows the value the stream started with.
+void saveUploadBundles(bool upload)
+{
+  ClientSettings latest = loadClientSettings();
+  if (latest.uploadBundles == upload) return;
+  latest.uploadBundles = upload;
+  saveClientSettings(latest);
+  blog(LOG_INFO, "[Synqframe] Bundles %s at Start Streaming (composition.uploadBundles)", upload ? "uploaded" : "not uploaded");
+}
+
 void applyCompositionOnUi(std::stop_token stop, CompositionMode mode, bool localVerticalProgram, const QString &codec)
 {
   auto apply = host.applyComposition;
@@ -321,6 +334,7 @@ void applyHeldComposition(std::stop_token stop)
 {
   if (contributionFeedsActive()) return;
   if (held.any()) {
+    if (held.uploadBundles) saveUploadBundles(*held.uploadBundles);
     const ClientSettings settings = loadClientSettings();
     applyCompositionOnUi(stop, held.mode.value_or(settings.compositionMode),
                          held.localVerticalProgram.value_or(settings.localVerticalProgram),
@@ -331,6 +345,7 @@ void applyHeldComposition(std::stop_token stop)
     }
     if (held.localVerticalProgram) statuses[QString::fromUtf8(KeyVerticalProgram)] = appliedStatus();
     if (held.programAudioCodec) statuses[QString::fromUtf8(KeyAudioCodec)] = appliedStatus();
+    if (held.uploadBundles) statuses[QString::fromUtf8(KeyUploadBundles)] = appliedStatus();
     held = {};
   }
   statuses[QString::fromUtf8(KeyRoutes)] = appliedStatus();
@@ -375,6 +390,9 @@ void applyDesired(std::stop_token stop, const QJsonObject &config)
   const QString codec = composition.value(QStringLiteral("programAudioCodec")).toString();
   const bool codecValid = codec == QStringLiteral("aac") || codec == QStringLiteral("opus");
   const bool vertical = composition.value(QStringLiteral("localVerticalProgram")).toBool(settings.localVerticalProgram);
+  // Absent (an older server): unchanged, so bundles stay on as before.
+  const QJsonValue uploadValue = composition.value(QStringLiteral("uploadBundles"));
+  const bool upload = uploadValue.isBool() ? uploadValue.toBool() : settings.uploadBundles;
 
   if (!mode) {
     statuses[QString::fromUtf8(KeyComposer)] = rejectedStatus(QStringLiteral("unsupported"));
@@ -385,6 +403,7 @@ void applyDesired(std::stop_token stop, const QJsonObject &config)
   const bool modeChanged = mode && *mode != settings.compositionMode;
   const bool verticalChanged = vertical != settings.localVerticalProgram;
   const bool codecChanged = codecValid && codec != settings.programAudioCodec;
+  const bool uploadChanged = upload != settings.uploadBundles;
   const bool feeds = contributionFeedsActive();
   if (feeds) {
     // Nothing is applied to a running output; hold the newest desired values.
@@ -392,7 +411,14 @@ void applyDesired(std::stop_token stop, const QJsonObject &config)
     if (modeChanged) held.mode = *mode;
     if (verticalChanged) held.localVerticalProgram = vertical;
     if (codecChanged) held.programAudioCodec = codec;
-  } else if (modeChanged || verticalChanged || codecChanged) {
+    if (uploadChanged) held.uploadBundles = upload;
+  } else {
+    // No feeds: a held value is stale, whatever this revision says.
+    held.uploadBundles.reset();
+    // Saved before the UI's apply is queued: that apply loads the settings afresh and saves them.
+    if (uploadChanged) saveUploadBundles(upload);
+  }
+  if (!feeds && (modeChanged || verticalChanged || codecChanged)) {
     held = {};
     applyCompositionOnUi(stop, mode.value_or(settings.compositionMode), vertical,
                          codecValid ? codec : settings.programAudioCodec);
@@ -405,6 +431,7 @@ void applyDesired(std::stop_token stop, const QJsonObject &config)
   settle(KeyCollaborate, mode.has_value(), modeChanged);
   settle(KeyVerticalProgram, true, verticalChanged);
   settle(KeyAudioCodec, codecValid, codecChanged);
+  settle(KeyUploadBundles, true, uploadChanged);
 
   // Then the current show, which the server resolved: OBS follows it and never refuses it.
   const QString desiredShow = config.value(QStringLiteral("currentShow")).toObject()
@@ -474,18 +501,18 @@ void applyDesired(std::stop_token stop, const QJsonObject &config)
   appliedRevision = revision;
   persistAppliedRevision();
   blog(LOG_INFO,
-       "[Synqframe] Config revision %d: show %s%s, composer %s, collaborate %s, vertical program %s, audio %s, routes %s",
+       "[Synqframe] Config revision %d: show %s%s, composer %s, collaborate %s, upload bundles %s, vertical program %s, audio %s, routes %s",
        revision, describeStatus(KeySession).toUtf8().constData(),
        outcome.changed ? " (changed)" : "",
        describeStatus(KeyComposer).toUtf8().constData(), describeStatus(KeyCollaborate).toUtf8().constData(),
-       describeStatus(KeyVerticalProgram).toUtf8().constData(),
+       describeStatus(KeyUploadBundles).toUtf8().constData(), describeStatus(KeyVerticalProgram).toUtf8().constData(),
        describeStatus(KeyAudioCodec).toUtf8().constData(), describeStatus(KeyRoutes).toUtf8().constData());
 }
 
 void workerMain(std::stop_token stop)
 {
   appliedRevision = loadClientSettings().appliedRevision;
-  for (const char *key : {KeySession, KeyComposer, KeyCollaborate, KeyVerticalProgram, KeyAudioCodec, KeyRoutes, KeyOwnStreamSettings, KeyRecordObs, KeyRecordBundles, KeyRecordBundleMode, KeyMaxUpload})
+  for (const char *key : {KeySession, KeyComposer, KeyCollaborate, KeyUploadBundles, KeyVerticalProgram, KeyAudioCodec, KeyRoutes, KeyOwnStreamSettings, KeyRecordObs, KeyRecordBundles, KeyRecordBundleMode, KeyMaxUpload})
     statuses[QString::fromUtf8(key)] = appliedStatus();
   while (!stop.stop_requested()) {
     std::optional<QJsonObject> next;

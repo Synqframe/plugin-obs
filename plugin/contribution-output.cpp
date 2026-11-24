@@ -53,6 +53,9 @@ struct ContributionOutput {
   // Only an output that started tells the server streaming stopped.
   bool started = false;
   bool publishing = false;
+  // uploadsBundles() as this output started: a bundle shown again mid-stream follows it, not a
+  // composition.uploadBundles saved since (that waits for the next Start Streaming).
+  bool uploadsBundles = false;
 };
 std::vector<ContributionOutput *> activeOutputs;
 
@@ -202,7 +205,7 @@ bool authorizeContribution(ClientSettings &settings, QString &error, bool persis
   if (bundleEndpoint.isEmpty() && settings.compositionMode == CompositionMode::Remote)
     bundleEndpoint = endpoint;
   if ((settings.compositionMode != CompositionMode::Remote && !programEndpoint.contains(QStringLiteral("{channel}"))) ||
-      (settings.compositionMode != CompositionMode::Native && !bundleEndpoint.contains(QStringLiteral("{channel}")))) {
+      (uploadsBundles(settings) && !bundleEndpoint.contains(QStringLiteral("{channel}")))) {
     error = QStringLiteral("The service returned an invalid contribution endpoint template.");
     return false;
   }
@@ -218,7 +221,13 @@ bool authorizeContribution(ClientSettings &settings, QString &error, bool persis
   settings.goLiveRequired = goLive.value(QStringLiteral("required")).toBool(false);
   settings.goLiveRequiredReason = goLive.value(QStringLiteral("requiredReason")).toString();
   readCurrentShow(settings, response.value(QStringLiteral("currentShow")).toObject());
-  if (persist) saveClientSettings(settings);
+  if (persist) {
+    // The config worker saves composition.uploadBundles directly (client-config.cpp), maybe while
+    // this call was out: keep its value rather than the one loaded before it.
+    ClientSettings saved = settings;
+    saved.uploadBundles = loadClientSettings().uploadBundles;
+    saveClientSettings(saved);
+  }
   return true;
 }
 
@@ -254,6 +263,7 @@ bool declareMediaProfileChannels(const ClientSettings &settings, const QStringLi
 {
   QJsonArray videoChannels;
   QJsonArray audioChannels;
+  // bundleIds are the bundles actually published (none when composition.uploadBundles is false).
   if (settings.compositionMode != CompositionMode::Native) {
     for (const QString &id : bundleIds) {
       videoChannels.append(id + QStringLiteral("_video"));
@@ -869,8 +879,11 @@ bool startOutput(void *data)
   // They are appended after the program's routes below, in the order they always had.
   synqframe::ProgramConfig bundleConfig;
   std::optional<QString> routeError;
-  if (settings.compositionMode != CompositionMode::Native)
+  context->uploadsBundles = uploadsBundles(settings);
+  if (context->uploadsBundles)
     routeError = addBundleRoutes(settings, videoBitrate, audioBitrate, bundleConfig);
+  else if (settings.compositionMode == CompositionMode::Local)
+    blog(LOG_INFO, "[Synqframe] Bundles not uploaded: nothing composes from them (composition.uploadBundles false)");
   if (routeError) {
     obs_output_set_last_error(context->output, routeError->toUtf8().constData());
     return false;
@@ -1162,8 +1175,8 @@ static QHash<QString, PendingBundle> pendingBundles; // UI thread; cleared when 
 static void addBundlesMidStream(ContributionOutput *context)
 {
   synqframe::ProgramPublisher &publisher = *context->publisher;
+  if (!context->uploadsBundles) return;
   ClientSettings settings = loadClientSettings();
-  if (settings.compositionMode == CompositionMode::Native) return;
   const std::vector<std::string> running = publisher.runningRouteIds();
   QString duplicate, error;
   QSet<QString> waiting;

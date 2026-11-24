@@ -19,6 +19,10 @@ struct ClientSettings {
   QString categoryId = QStringLiteral("valorant");
   CompositionMode compositionMode = CompositionMode::Native;
   bool localVerticalProgram = false;
+  // composition.uploadBundles (obs-client-config, server-computed): whether synqframe-local uploads
+  // the bundles. Synqframe relaying a self-composed program needs none; something composing from them
+  // (a team show, a public match, bundle recording) does. True when an older server leaves it out.
+  bool uploadBundles = true;
   // Bundle ISOs while feeds publish (the dock's recording.bundleMode): "off", "stream-copy" (each
   // bundle's own upload encode to a file) or "source-record" (a Source Record filter per bundle
   // source). Taken at Start Streaming. OBS's own recording is OBS's setting (recording.obs retired).
@@ -89,6 +93,9 @@ const char *compositionModeName(CompositionMode mode);
 // program ("self": OBS, "platform": the compositor), and whether the bundles are uploaded.
 const char *composerName(CompositionMode mode);
 bool collaborates(CompositionMode mode);
+// Whether Start Streaming publishes the bundles: always when the platform composes, in
+// synqframe-local only when uploadBundles, never in Native.
+bool uploadsBundles(const ClientSettings &settings);
 // Whether an older plugin turned off OBS's global audio devices (remote mode), so they are turned
 // back on once (global-audio.hpp). Its own key, apart from ClientSettings, so a
 // stale copy saved elsewhere never overwrites it.

@@ -113,6 +113,7 @@ ClientSettings readClientSettings()
                                    ? CompositionMode::Local
                                    : CompositionMode::Native;
   settings.localVerticalProgram = store.value(QStringLiteral("client/localVerticalProgram"), false).toBool();
+  settings.uploadBundles = store.value(QStringLiteral("client/uploadBundles"), true).toBool();
   // Retired with session picking (2026-10-08).
   store.remove(QStringLiteral("client/ownStreamSettings"));
   store.remove(QStringLiteral("client/recordObs"));
@@ -184,6 +185,7 @@ void saveClientSettings(const ClientSettings &settings)
   store.setValue(QStringLiteral("client/compositionMode"), QString::fromUtf8(compositionModeName(settings.compositionMode)));
   store.remove(QStringLiteral("client/collaborate")); // never used; the mode says it
   store.setValue(QStringLiteral("client/localVerticalProgram"), settings.localVerticalProgram);
+  store.setValue(QStringLiteral("client/uploadBundles"), settings.uploadBundles);
   store.setValue(QStringLiteral("client/bundleRecording"), settings.bundleRecording);
   store.setValue(QStringLiteral("client/showOnStartup"), settings.showOnStartup);
   store.setValue(QStringLiteral("remote/serviceUrl"), settings.serviceUrl);
@@ -252,6 +254,12 @@ const char *composerName(CompositionMode mode)
 bool collaborates(CompositionMode mode)
 {
   return mode != CompositionMode::Native;
+}
+
+bool uploadsBundles(const ClientSettings &settings)
+{
+  if (settings.compositionMode == CompositionMode::Remote) return true;
+  return settings.compositionMode == CompositionMode::Local && settings.uploadBundles;
 }
 
 bool globalAudioScrubbed()
