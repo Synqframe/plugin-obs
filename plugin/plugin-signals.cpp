@@ -58,8 +58,13 @@ obs_hotkey_id highlightHotkey = OBS_INVALID_HOTKEY_ID;
 // Be right back: POST /api/me/show/brb {on} (manager-only; the server switches the show to its
 // pack's brb scene and back, msgs 1640/1645). The hotkey asks for the opposite of what the server
 // last answered; the answer ({on}) is the truth, so a retried call can't flip it twice.
+// Only a show the platform composes (composer platform: Remote) has a brb scene to switch to; on a
+// show OBS composes the creator switches to their own BRB scene (owner 2026-11-24, msgs 1811/1824:
+// the route answers 409 there). So the hotkey is registered only in Remote mode, and its bindings
+// are kept (brbKeys) while it isn't, so they come back with it and survive saves meanwhile.
 constexpr const char *BrbHotkeyName = "synqframe_brb";
 obs_hotkey_id brbHotkey = OBS_INVALID_HOTKEY_ID;
+obs_data_array_t *brbKeys = nullptr; // the bindings while the hotkey isn't registered
 bool brbOn = false;
 bool brbInFlight = false;
 
@@ -304,6 +309,10 @@ void toggleBrb()
     blog(LOG_INFO, "[Synqframe] Be right back: not signed in");
     return;
   }
+  if (settings.compositionMode != CompositionMode::Remote) {
+    blog(LOG_INFO, "[Synqframe] Be right back: OBS composes this show; switch to your BRB scene there");
+    return;
+  }
   brbInFlight = true;
   const bool want = !brbOn;
   asyncHttp(context, synqframeCall(settings, "POST", QStringLiteral("/api/me/show/brb"), QJsonObject{{QStringLiteral("on"), want}}),
@@ -316,6 +325,13 @@ void toggleBrb()
                 blog(LOG_WARNING, "[Synqframe] Be right back: only the show's managers can switch it");
               } else if (reply.status == 404) {
                 blog(LOG_INFO, "[Synqframe] Be right back: no show to switch");
+              } else if (reply.status == 409) {
+                const QJsonObject body = reply.json();
+                QString why;
+                for (const char *key : {"detail", "error", "message"})
+                  if (why.isEmpty()) why = body.value(QLatin1String(key)).toString();
+                blog(LOG_INFO, "[Synqframe] Be right back: %s",
+                     why.isEmpty() ? "not for this show" : why.toUtf8().constData());
               } else if (!reply.ok()) {
                 blog(LOG_WARNING, "[Synqframe] Be right back: the service answered %d", reply.status);
               } else {
@@ -340,14 +356,33 @@ void loadHotkey(obs_data_t *saved, const char *name, obs_hotkey_id id)
   obs_data_array_release(keys);
 }
 
+// The BRB hotkey registered while the show is platform-composed, and not otherwise (above).
+void syncBrbHotkey()
+{
+  const bool want = loadClientSettings().compositionMode == CompositionMode::Remote;
+  if (want && brbHotkey == OBS_INVALID_HOTKEY_ID) {
+    brbHotkey = obs_hotkey_register_frontend(BrbHotkeyName, "Synqframe: be right back (on/off)", onBrb, nullptr);
+    if (brbKeys) {
+      obs_hotkey_load(brbHotkey, brbKeys);
+      obs_data_array_release(brbKeys);
+      brbKeys = nullptr;
+    }
+  } else if (!want && brbHotkey != OBS_INVALID_HOTKEY_ID) {
+    if (brbKeys) obs_data_array_release(brbKeys);
+    brbKeys = obs_hotkey_save(brbHotkey);
+    obs_hotkey_unregister(brbHotkey);
+    brbHotkey = OBS_INVALID_HOTKEY_ID;
+  }
+}
+
 void registerHotkey()
 {
   highlightHotkey = obs_hotkey_register_frontend(HotkeyName, "Synqframe: mark this moment", onHighlight, nullptr);
-  brbHotkey = obs_hotkey_register_frontend(BrbHotkeyName, "Synqframe: be right back (on/off)", onBrb, nullptr);
   obs_data_t *saved = obs_data_create_from_json_file(hotkeyFile().toUtf8().constData());
   loadHotkey(saved, HotkeyName, highlightHotkey);
-  loadHotkey(saved, BrbHotkeyName, brbHotkey);
+  if (saved) brbKeys = obs_data_get_array(saved, BrbHotkeyName); // null when there are none
   if (saved) obs_data_release(saved);
+  syncBrbHotkey();
 }
 
 } // namespace
@@ -381,6 +416,7 @@ void startPluginSignals(QObject *uiContext, std::function<void(const std::string
   QObject::connect(watchTimer, &QTimer::timeout, [] {
     watchCaptures();
     watchSpeech();
+    syncBrbHotkey(); // the composition mode can change with a config revision or the settings
   });
   watchTimer->start(WatchEveryMs);
   registerHotkey();
@@ -396,6 +432,8 @@ void stopPluginSignals()
   if (highlightHotkey != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(highlightHotkey);
   if (brbHotkey != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(brbHotkey);
   highlightHotkey = brbHotkey = OBS_INVALID_HOTKEY_ID;
+  if (brbKeys) obs_data_array_release(brbKeys);
+  brbKeys = nullptr;
   sendPayload = nullptr;
   context = nullptr;
 }
@@ -410,6 +448,7 @@ void savePluginSignalHotkeys()
     obs_data_set_array(saved, name, keys);
     obs_data_array_release(keys);
   }
+  if (brbHotkey == OBS_INVALID_HOTKEY_ID && brbKeys) obs_data_set_array(saved, BrbHotkeyName, brbKeys); // kept while hidden
   char *dir = obs_module_config_path("");
   os_mkdirs(dir);
   bfree(dir);
